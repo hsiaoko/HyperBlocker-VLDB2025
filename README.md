@@ -77,6 +77,19 @@ A similarity atom is a theta-join with a similarity condition. The optimizer
 schedules it by cost like other joins, preferring cheap equality joins first,
 and runs it on both the CPU and GPU backends.
 
+### Legacy YAML rules
+
+`--rules` takes Datalog text. To reuse an original HyperBlocker YAML rule,
+translate it first with `tools/yaml2datalog.py`, which decodes the paper format
+(`Preconditions` equalities, similarity pairs, thresholds, and the consequence
+pair) and emits Datalog. Equality columns become a shared variable so the
+optimizer blocks on them first.
+
+```
+python3 tools/yaml2datalog.py rule.yaml tableA.csv tableB.csv -o rules.dl
+build/examples/hyperdeduce --data_dir . --rules rules.dl --backend gpu --has_header
+```
+
 ## Library API
 
 ```cpp
