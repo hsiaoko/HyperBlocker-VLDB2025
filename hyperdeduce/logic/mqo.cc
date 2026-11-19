@@ -14,17 +14,37 @@ bool IsRelational(const Atom &atom) {
   return !BuiltinRegistry::Instance().IsBuiltin(atom.predicate);
 }
 
-std::string TermKey(const Term &term) {
+// Maps each variable to a canonical label by first appearance in the relational
+// body. Two bodies that differ only in variable names get the same labels, so
+// structurally equivalent queries share a base regardless of naming.
+std::map<std::string, std::string> CanonicalMap(const Rule &rule) {
+  std::map<std::string, std::string> mapping;
+  for (const Atom &atom : rule.body) {
+    if (!IsRelational(atom)) {
+      continue;
+    }
+    for (const Term &term : atom.terms) {
+      if (term.is_variable && mapping.count(term.variable) == 0) {
+        mapping[term.variable] = "c" + std::to_string(mapping.size());
+      }
+    }
+  }
+  return mapping;
+}
+
+std::string TermKey(const Term &term,
+                    const std::map<std::string, std::string> &mapping) {
   if (term.is_variable) {
-    return "v:" + term.variable;
+    return "v:" + mapping.at(term.variable);
   }
   return "c:" + std::to_string(static_cast<int>(term.constant.type)) + ":" +
          term.constant.text;
 }
 
-// A canonical key for the relational body: predicates, term order, and variable
-// names. Rules with the same key generate the same candidate tuples.
+// A canonical key for the relational body: predicates, term order, variable
+// equality pattern, and constants, with variables normalized by first appearance.
 std::string BodySignature(const Rule &rule) {
+  const auto mapping = CanonicalMap(rule);
   std::string signature;
   for (const Atom &atom : rule.body) {
     if (!IsRelational(atom)) {
@@ -35,34 +55,36 @@ std::string BodySignature(const Rule &rule) {
       if (i > 0) {
         signature += ",";
       }
-      signature += TermKey(atom.terms[i]);
+      signature += TermKey(atom.terms[i], mapping);
     }
     signature += ");";
   }
   return signature;
 }
 
-std::vector<std::string> BoundVariables(const Rule &rule) {
-  std::vector<std::string> vars;
-  std::unordered_set<std::string> seen;
-  for (const Atom &atom : rule.body) {
-    if (!IsRelational(atom)) {
-      continue;
-    }
-    for (const Term &term : atom.terms) {
-      if (term.is_variable && seen.insert(term.variable).second) {
-        vars.push_back(term.variable);
-      }
-    }
+Term RenameTerm(const Term &term,
+                const std::map<std::string, std::string> &mapping) {
+  if (!term.is_variable) {
+    return term;
   }
-  return vars;
+  return Term::Variable(mapping.at(term.variable));
 }
 
-Atom SharedAtom(const std::string &name, const std::vector<std::string> &vars) {
+Atom RenameAtom(const Atom &atom,
+                const std::map<std::string, std::string> &mapping) {
+  Atom renamed;
+  renamed.predicate = atom.predicate;
+  for (const Term &term : atom.terms) {
+    renamed.terms.push_back(RenameTerm(term, mapping));
+  }
+  return renamed;
+}
+
+Atom CanonicalAtom(const std::string &name, std::size_t arity) {
   Atom atom;
   atom.predicate = name;
-  for (const std::string &var : vars) {
-    atom.terms.push_back(Term::Variable(var));
+  for (std::size_t i = 0; i < arity; ++i) {
+    atom.terms.push_back(Term::Variable("c" + std::to_string(i)));
   }
   return atom;
 }
@@ -75,8 +97,8 @@ void ApplyMqo(std::vector<Rule> &rules, const Catalog &catalog) {
     idb_heads.insert(rule.head.predicate);
   }
 
-  // Group rules by relational-body signature, keeping only all-EDB bodies so the
-  // shared base is non-recursive and materializes once.
+  // Group rules by canonical relational-body signature, keeping only all-EDB
+  // bodies so the shared base is non-recursive and materializes once.
   std::map<std::string, std::vector<std::size_t>> groups;
   for (std::size_t i = 0; i < rules.size(); ++i) {
     bool has_relational = false;
@@ -105,28 +127,29 @@ void ApplyMqo(std::vector<Rule> &rules, const Catalog &catalog) {
       continue;
     }
     const Rule &representative = rules[group.second[0]];
-    const std::vector<std::string> vars = BoundVariables(representative);
+    const auto rep_mapping = CanonicalMap(representative);
+    const std::size_t arity = rep_mapping.size();
     const std::string shared_name = "__shared_" + std::to_string(shared_id++);
 
     Rule base;
-    base.head = SharedAtom(shared_name, vars);
+    base.head = CanonicalAtom(shared_name, arity);
     for (const Atom &atom : representative.body) {
       if (IsRelational(atom)) {
-        base.body.push_back(atom);
+        base.body.push_back(RenameAtom(atom, rep_mapping));
       }
     }
     added.push_back(std::move(base));
 
     for (std::size_t i : group.second) {
-      Rule rewritten_rule = rules[i];
-      std::vector<Atom> new_body;
-      new_body.push_back(SharedAtom(shared_name, vars));
+      const auto mapping = CanonicalMap(rules[i]);
+      Rule rewritten_rule;
+      rewritten_rule.head = RenameAtom(rules[i].head, mapping);
+      rewritten_rule.body.push_back(CanonicalAtom(shared_name, arity));
       for (const Atom &atom : rules[i].body) {
         if (!IsRelational(atom)) {
-          new_body.push_back(atom);
+          rewritten_rule.body.push_back(RenameAtom(atom, mapping));
         }
       }
-      rewritten_rule.body = std::move(new_body);
       added.push_back(std::move(rewritten_rule));
       rewritten.insert(i);
     }

@@ -75,5 +75,35 @@ TEST(MqoTest, SharingPreservesResults) {
   }
 }
 
+TEST(MqoTest, NormalizedVariableNamesShareOneBase) {
+  const std::string a = WriteTemp("mqon_docA.csv", "a1,martha\na2,dixon\na3,algorithm\n");
+  const std::string b =
+      WriteTemp("mqon_docB.csv", "b1,marhta\nb2,dicksonx\nb3,algorithm\n");
+  // Same structure, different variable names: normalization must group them.
+  const char rules[] =
+      "match_jw(a, b) :- docA(a, t1), docB(b, t2), jaro_winkler(t1, t2, 0.85).\n"
+      "match_renamed(x, y) :- docA(x, u), docB(y, v), jaro_winkler(u, v, 0.85).";
+
+  Engine engine;
+  ASSERT_TRUE(engine.LoadCsv(a, "docA").ok());
+  ASSERT_TRUE(engine.LoadCsv(b, "docB").ok());
+  ASSERT_TRUE(engine.AddRules(rules).ok());
+  engine.set_mqo(true);
+  ASSERT_TRUE(engine.BuildPlan().ok());
+
+  int shared_count = 0;
+  for (const std::string &name : engine.catalog().RelationNames()) {
+    if (name.rfind("__shared_", 0) == 0) {
+      ++shared_count;
+    }
+  }
+  EXPECT_EQ(1, shared_count);
+
+  CpuBackend backend;
+  ASSERT_TRUE(engine.Execute(&backend).ok());
+  EXPECT_EQ(Rows(engine, "match_jw"), Rows(engine, "match_renamed"));
+  EXPECT_GT(Rows(engine, "match_jw").size(), 0u);
+}
+
 } // namespace
 } // namespace hyperdeduce
