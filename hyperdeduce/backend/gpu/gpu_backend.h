@@ -1,7 +1,9 @@
 #ifndef HYPERDEDUCE_BACKEND_GPU_GPU_BACKEND_H_
 #define HYPERDEDUCE_BACKEND_GPU_GPU_BACKEND_H_
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "hyperdeduce/backend/backend.h"
 
@@ -19,14 +21,26 @@ class GpuBackend : public Backend {
 public:
   // num_devices <= 0 means use every visible device.
   explicit GpuBackend(int num_devices = 0);
+  ~GpuBackend() override;
 
   std::string name() const override { return "gpu"; }
 
   StatusOr<Relation> Execute(const PhysicalOp &plan,
                              const ExecutionContext &context) override;
 
+  std::vector<int> device_ids() const override { return device_ids_; }
+
+  // Samples device utilization across a whole evaluation via NVML.
+  void BeginMonitor() override;
+  void EndMonitor() override;
+  double gpu_util_avg() const override;
+  double gpu_util_max() const override;
+
 private:
   int num_devices_;
+  std::vector<int> device_ids_;
+  struct Monitor;
+  std::unique_ptr<Monitor> monitor_;
 };
 
 } // namespace hyperdeduce

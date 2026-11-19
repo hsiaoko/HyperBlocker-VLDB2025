@@ -1,6 +1,7 @@
 #include "hyperdeduce/backend/gpu/gpu_backend.h"
 
 #include <cuda_runtime.h>
+#include <nvml.h>
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
@@ -10,6 +11,8 @@
 #include <thrust/sort.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
@@ -612,6 +615,7 @@ struct DeviceContext {
   thrust::device_vector<char> chars;
   StringTable table;
   std::size_t max_string_length = 0;
+  BackendStats *stats = nullptr;
 };
 
 Status UploadDictionary(const Dictionary &dictionary, DeviceContext *ctx) {
@@ -851,6 +855,7 @@ StatusOr<DeviceRelation> EvalSimilarityJoinT(const PhysicalOp &op,
   const std::size_t out_cols = op.output_schema.size();
 
   const bool bench = std::getenv("HYPERDEDUCE_BENCH") != nullptr;
+  const bool measure = bench || device->stats != nullptr;
   cudaEvent_t ev_start = nullptr;
   cudaEvent_t ev_stop = nullptr;
   if (bench) {
@@ -872,6 +877,8 @@ StatusOr<DeviceRelation> EvalSimilarityJoinT(const PhysicalOp &op,
                    Code, attr.localSizeBytes, attr.numRegs, blocks_per_sm,
                    prop.maxThreadsPerMultiProcessor);
     }
+  }
+  if (measure) {
     cudaEventCreate(&ev_start);
     cudaEventCreate(&ev_stop);
     cudaEventRecord(ev_start);
@@ -921,14 +928,19 @@ StatusOr<DeviceRelation> EvalSimilarityJoinT(const PhysicalOp &op,
         thrust::raw_pointer_cast(out_counter.data()));
     CUDA_CHECK(cudaGetLastError());
   }
-  if (bench) {
+  if (measure) {
     cudaEventRecord(ev_stop);
     cudaEventSynchronize(ev_stop);
     float ms = 0;
     cudaEventElapsedTime(&ms, ev_start, ev_stop);
-    std::fprintf(stderr,
-                 "[bench] gpu similarity_join measure=%s ms=%.3f pairs=%zu out=%zu\n",
-                 op.measure.c_str(), ms, nrows_left * nrows_right, total);
+    if (device->stats != nullptr) {
+      device->stats->AddKernel(ms, nrows_left * nrows_right);
+    }
+    if (bench) {
+      std::fprintf(stderr,
+                   "[bench] gpu similarity_join measure=%s ms=%.3f pairs=%zu out=%zu\n",
+                   op.measure.c_str(), ms, nrows_left * nrows_right, total);
+    }
     cudaEventDestroy(ev_start);
     cudaEventDestroy(ev_stop);
   }
@@ -1056,6 +1068,7 @@ StatusOr<Relation> RunOnDevice(int device_id, const PhysicalOp &plan,
                                    &shards) {
   CUDA_CHECK(cudaSetDevice(device_id));
   DeviceContext device;
+  device.stats = ctx.stats;
   Status dictionary = UploadDictionary(ctx.dictionary(), &device);
   if (!dictionary.ok()) {
     return dictionary;
@@ -1070,7 +1083,101 @@ StatusOr<Relation> RunOnDevice(int device_id, const PhysicalOp &plan,
 
 } // namespace
 
-GpuBackend::GpuBackend(int num_devices) : num_devices_(num_devices) {}
+// Samples GPU utilization with NVML while evaluation runs. Handles are resolved
+// by PCI bus id so CUDA_VISIBLE_DEVICES remapping does not point at the wrong
+// physical device. The sums are written only by the sampling thread and read
+// after it joins, so they need no synchronization beyond the stop flag.
+struct GpuBackend::Monitor {
+  std::vector<nvmlDevice_t> handles;
+  std::thread thread;
+  std::atomic<bool> stop{false};
+  double util_sum = 0;
+  unsigned util_max = 0;
+  unsigned samples = 0;
+  bool nvml_ok = false;
+};
+
+GpuBackend::GpuBackend(int num_devices) : num_devices_(num_devices) {
+  int available = 0;
+  cudaGetDeviceCount(&available);
+  int devices = num_devices_ > 0 ? std::min(num_devices_, available) : available;
+  for (int d = 0; d < devices; ++d) {
+    device_ids_.push_back(d);
+  }
+}
+
+GpuBackend::~GpuBackend() {
+  if (monitor_) {
+    monitor_->stop.store(true);
+    if (monitor_->thread.joinable()) {
+      monitor_->thread.join();
+    }
+  }
+}
+
+void GpuBackend::BeginMonitor() {
+  monitor_ = std::make_unique<Monitor>();
+  if (nvmlInit_v2() != NVML_SUCCESS) {
+    return;
+  }
+  monitor_->nvml_ok = true;
+  for (int id : device_ids_) {
+    char bus_id[32] = {0};
+    if (cudaDeviceGetPCIBusId(bus_id, sizeof(bus_id), id) != cudaSuccess) {
+      continue;
+    }
+    nvmlDevice_t handle;
+    if (nvmlDeviceGetHandleByPciBusId_v2(bus_id, &handle) == NVML_SUCCESS) {
+      monitor_->handles.push_back(handle);
+    }
+  }
+  Monitor *monitor = monitor_.get();
+  monitor_->thread = std::thread([monitor]() {
+    while (!monitor->stop.load()) {
+      unsigned sum = 0;
+      unsigned count = 0;
+      for (nvmlDevice_t handle : monitor->handles) {
+        nvmlUtilization_t utilization;
+        if (nvmlDeviceGetUtilizationRates(handle, &utilization) == NVML_SUCCESS) {
+          sum += utilization.gpu;
+          ++count;
+          if (utilization.gpu > monitor->util_max) {
+            monitor->util_max = utilization.gpu;
+          }
+        }
+      }
+      if (count > 0) {
+        monitor->util_sum += static_cast<double>(sum) / count;
+        ++monitor->samples;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+  });
+}
+
+void GpuBackend::EndMonitor() {
+  if (!monitor_) {
+    return;
+  }
+  monitor_->stop.store(true);
+  if (monitor_->thread.joinable()) {
+    monitor_->thread.join();
+  }
+  if (monitor_->nvml_ok) {
+    nvmlShutdown();
+  }
+}
+
+double GpuBackend::gpu_util_avg() const {
+  if (!monitor_ || monitor_->samples == 0) {
+    return 0;
+  }
+  return monitor_->util_sum / monitor_->samples;
+}
+
+double GpuBackend::gpu_util_max() const {
+  return monitor_ ? monitor_->util_max : 0;
+}
 
 StatusOr<Relation> GpuBackend::Execute(const PhysicalOp &plan,
                                        const ExecutionContext &context) {

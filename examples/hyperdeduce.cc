@@ -29,6 +29,7 @@ DEFINE_string(output_dir, "", "directory to write derived relations");
 DEFINE_string(backend, "cpu", "execution backend: cpu or gpu");
 DEFINE_int32(gpus, 0, "number of GPUs to use (0 = all visible)");
 DEFINE_bool(explain, false, "print the execution plans before running");
+DEFINE_bool(report, true, "print the run report (load/plan/eval stats and timing)");
 DEFINE_bool(has_header, false, "treat the first CSV row as column names");
 
 namespace {
@@ -76,35 +77,62 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  auto rules = ReadFile(FLAGS_rules);
-  if (!rules.ok()) {
-    std::cerr << rules.status().message() << "\n";
-    return 1;
-  }
-  // The input module dispatches by file extension; the CLI does not branch on
-  // the format itself. Unknown extensions fall back to Datalog text.
-  std::string extension =
-      std::filesystem::path(FLAGS_rules).extension().string();
-  if (!extension.empty()) {
-    extension = extension.substr(1);
-  }
-  const hyperdeduce::RuleFrontend *frontend =
-      hyperdeduce::FrontendRegistry::Instance().ByExtension(extension);
-  if (frontend == nullptr) {
-    frontend = hyperdeduce::FrontendRegistry::Instance().ByName("datalog");
-  }
   hyperdeduce::RuleInputContext context;
   std::stringstream stream(FLAGS_tables);
-  std::string name;
-  while (std::getline(stream, name, ',')) {
-    if (!name.empty()) {
-      context.table_names.push_back(name);
+  std::string table_name;
+  while (std::getline(stream, table_name, ',')) {
+    if (!table_name.empty()) {
+      context.table_names.push_back(table_name);
     }
   }
-  Status added = engine.AddRules(rules.value(), *frontend, context);
-  if (!added.ok()) {
-    std::cerr << "parse failed: " << added.message() << "\n";
-    return 1;
+
+  // The input module dispatches by file extension; the CLI does not branch on
+  // the format itself. Unknown extensions fall back to Datalog text.
+  auto add_rule_file = [&](const std::string &path) -> Status {
+    auto text = ReadFile(path);
+    if (!text.ok()) {
+      return text.status();
+    }
+    std::string ext = std::filesystem::path(path).extension().string();
+    if (!ext.empty()) {
+      ext = ext.substr(1);
+    }
+    const hyperdeduce::RuleFrontend *frontend =
+        hyperdeduce::FrontendRegistry::Instance().ByExtension(ext);
+    if (frontend == nullptr) {
+      frontend = hyperdeduce::FrontendRegistry::Instance().ByName("datalog");
+    }
+    return engine.AddRules(text.value(), *frontend, context);
+  };
+
+  // --rules accepts a single file or a folder of rule files. A folder enables
+  // multiple queries that the optimizer can share common subexpressions across.
+  if (std::filesystem::is_directory(FLAGS_rules)) {
+    for (const auto &entry :
+         std::filesystem::directory_iterator(FLAGS_rules)) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      std::string ext = entry.path().extension().string();
+      if (!ext.empty()) {
+        ext = ext.substr(1);
+      }
+      if (hyperdeduce::FrontendRegistry::Instance().ByExtension(ext) == nullptr) {
+        continue;
+      }
+      Status added = add_rule_file(entry.path().string());
+      if (!added.ok()) {
+        std::cerr << "parse failed (" << entry.path().string()
+                  << "): " << added.message() << "\n";
+        return 1;
+      }
+    }
+  } else {
+    Status added = add_rule_file(FLAGS_rules);
+    if (!added.ok()) {
+      std::cerr << "parse failed: " << added.message() << "\n";
+      return 1;
+    }
   }
 
   auto plan = engine.BuildPlan();
@@ -156,6 +184,10 @@ int main(int argc, char *argv[]) {
       std::cout << name << ": " << engine.GetRelation(name)->num_rows()
                 << " rows\n";
     }
+  }
+
+  if (FLAGS_report) {
+    std::cout << hyperdeduce::FormatReport(engine.run_stats());
   }
 
   gflags::ShutDownCommandLineFlags();

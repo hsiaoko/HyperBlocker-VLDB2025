@@ -18,6 +18,7 @@
 #include "hyperdeduce/io/csv.h"
 #include "hyperdeduce/logic/program.h"
 #include "hyperdeduce/parser/ast.h"
+#include "hyperdeduce/engine/run_stats.h"
 #include "hyperdeduce/plan/physical_plan.h"
 #include "hyperdeduce/plan/stats.h"
 
@@ -63,6 +64,9 @@ public:
 
   const Catalog &catalog() const { return catalog_; }
 
+  // Statistics collected across load, plan, and the most recent Execute.
+  const RunStats &run_stats() const { return run_stats_; }
+
 private:
   Status EnsurePlanned();
   Status InferIdbSchemas();
@@ -78,6 +82,8 @@ private:
   std::map<std::pair<int, int>, std::unique_ptr<PhysicalOp>> delta_plans_;
   std::unordered_map<std::string, std::unordered_set<RowKey, KeyHash>> idb_index_;
   bool planned_ = false;
+  RunStats run_stats_;
+  BackendStats backend_stats_;
 };
 
 } // namespace hyperdeduce

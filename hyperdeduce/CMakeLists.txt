@@ -19,7 +19,7 @@ target_link_libraries(hyperdeduce PUBLIC TBB::tbb gflags yaml-cpp::yaml-cpp)
 
 if(HYPERDEDUCE_WITH_CUDA)
   target_compile_definitions(hyperdeduce PUBLIC HYPERDEDUCE_WITH_CUDA=1)
-  target_link_libraries(hyperdeduce PUBLIC CUDA::cudart)
+  target_link_libraries(hyperdeduce PUBLIC CUDA::cudart CUDA::nvml)
   set_target_properties(hyperdeduce PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
 

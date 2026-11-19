@@ -1,5 +1,6 @@
 #include "hyperdeduce/engine/engine.h"
 
+#include <chrono>
 #include <filesystem>
 #include <sstream>
 #include <utility>
@@ -30,12 +31,26 @@ StatusOr<Relation *> Engine::LoadRelation(const std::string &path,
   if (loader == nullptr) {
     return Status::Error("no loader registered for extension: " + extension);
   }
+  const auto start = std::chrono::steady_clock::now();
   auto loaded = loader->Load(path, name, &catalog_, options);
   if (!loaded.ok()) {
     return loaded.status();
   }
+  const double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start).count();
+  Relation *relation = loaded.value();
+  RelationLoadStats load_stats;
+  load_stats.name = name;
+  load_stats.rows = relation->num_rows();
+  load_stats.cols = relation->num_columns();
+  for (const ColumnSchema &column : relation->schema()) {
+    load_stats.types.push_back(column.type);
+  }
+  load_stats.load_ms = ms;
+  run_stats_.loads.push_back(std::move(load_stats));
+  run_stats_.load_ms += ms;
   planned_ = false;
-  return loaded.value();
+  return relation;
 }
 
 Status Engine::LoadCsv(const std::string &path, const std::string &name,
@@ -169,6 +184,7 @@ Status Engine::InferIdbSchemas() {
 }
 
 StatusOr<std::string> Engine::BuildPlan() {
+  const auto start = std::chrono::steady_clock::now();
   auto program = BuildProgram(rules_);
   if (!program.ok()) {
     return program.status();
@@ -194,6 +210,10 @@ StatusOr<std::string> Engine::BuildPlan() {
     full_plans_.push_back(std::move(plan).value());
   }
   planned_ = true;
+  run_stats_.plan_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - start).count();
+  run_stats_.rule_count = static_cast<int>(rules_.size());
+  run_stats_.stratum_count = static_cast<int>(program_->strata().size());
   return explain.str();
 }
 
@@ -247,9 +267,14 @@ Status Engine::EvaluateStratum(Backend *backend,
     delta.emplace(name, Relation(name, relation->schema()));
   }
 
+  const auto stratum_start = std::chrono::steady_clock::now();
+  int rounds = 0;
+  std::size_t facts_derived = 0;
   bool first = true;
   while (true) {
+    ++rounds;
     ExecutionContext context(&catalog_.dictionary());
+    context.stats = &backend_stats_;
     for (const std::string &name : catalog_.RelationNames()) {
       const Relation *full = catalog_.GetRelation(name);
       const Relation *d = members.count(name) != 0 ? &delta.at(name) : nullptr;
@@ -318,6 +343,7 @@ Status Engine::EvaluateStratum(Backend *backend,
       }
     }
     delta = std::move(new_delta);
+    facts_derived += total_new;
 
     if (!recursive) {
       break;
@@ -327,6 +353,16 @@ Status Engine::EvaluateStratum(Backend *backend,
     }
     first = false;
   }
+
+  StratumStats stratum_stats;
+  stratum_stats.predicates = stratum;
+  stratum_stats.recursive = recursive;
+  stratum_stats.rounds = rounds;
+  stratum_stats.facts_derived = facts_derived;
+  stratum_stats.eval_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - stratum_start)
+                              .count();
+  run_stats_.strata.push_back(std::move(stratum_stats));
   return Status::Ok();
 }
 
@@ -335,11 +371,33 @@ Status Engine::Execute(Backend *backend) {
   if (!planned.ok()) {
     return planned;
   }
+  run_stats_.strata.clear();
+  run_stats_.outputs.clear();
+  run_stats_.gpu = GpuStats{};
+  backend_stats_.Reset();
+  run_stats_.backend = backend->name();
+  run_stats_.gpu.devices = static_cast<int>(backend->device_ids().size());
+
+  const auto start = std::chrono::steady_clock::now();
+  backend->BeginMonitor();
   for (const std::vector<std::string> &stratum : program_->strata()) {
     Status evaluated = EvaluateStratum(backend, stratum);
     if (!evaluated.ok()) {
+      backend->EndMonitor();
       return evaluated;
     }
+  }
+  backend->EndMonitor();
+  run_stats_.eval_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - start).count();
+  run_stats_.gpu.kernel_ms = backend_stats_.kernel_ms;
+  run_stats_.gpu.pairs = backend_stats_.pairs;
+  run_stats_.gpu.util_avg = backend->gpu_util_avg();
+  run_stats_.gpu.util_max = backend->gpu_util_max();
+  run_stats_.total_ms = run_stats_.load_ms + run_stats_.plan_ms + run_stats_.eval_ms;
+
+  for (const std::string &name : IdbNames()) {
+    run_stats_.outputs.emplace_back(name, GetRelation(name)->num_rows());
   }
   return Status::Ok();
 }
