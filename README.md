@@ -18,10 +18,11 @@ of `parent`.
 ## Build
 
 You need a C++17 compiler, CMake 3.18 or newer, TBB, gflags, and GoogleTest. The
-GPU backend also needs the CUDA toolkit. rapidcsv is the only submodule.
+GPU backend also needs the CUDA toolkit. rapidcsv (CSV parsing) and yaml-cpp
+(legacy YAML rules) are submodules.
 
 ```
-git submodule update --init third_party/rapidcsv
+git submodule update --init third_party/rapidcsv third_party/yaml-cpp
 cmake -S . -B build
 cmake --build build -j
 (cd build && ctest)
@@ -79,16 +80,21 @@ and runs it on both the CPU and GPU backends.
 
 ### Legacy YAML rules
 
-`--rules` takes Datalog text. To reuse an original HyperBlocker YAML rule,
-translate it first with `tools/yaml2datalog.py`, which decodes the paper format
+`--rules` accepts Datalog text (`.dl`) or an original HyperBlocker YAML rule
+(`.yaml`) directly. The input module dispatches by file extension: each format
+is a `RuleFrontend` that parses into the shared rule AST, so the engine and CLI
+never branch on the format. The YAML frontend decodes the paper format
 (`Preconditions` equalities, similarity pairs, thresholds, and the consequence
-pair) and emits Datalog. Equality columns become a shared variable so the
-optimizer blocks on them first.
+pair); equality columns become a shared variable so the optimizer blocks on them
+first. Load the referenced tables before adding the rule.
 
 ```
-python3 tools/yaml2datalog.py rule.yaml tableA.csv tableB.csv -o rules.dl
-build/examples/hyperdeduce --data_dir . --rules rules.dl --backend gpu --has_header
+build/examples/hyperdeduce --data_dir . --rules rule.yaml --backend gpu --has_header
 ```
+
+`--tables tableA,tableB` maps YAML table indices 0 and 1 to relation names.
+`tools/yaml2datalog.py` remains as a standalone YAML-to-Datalog translator if you
+want the Datalog text explicitly.
 
 ## Library API
 

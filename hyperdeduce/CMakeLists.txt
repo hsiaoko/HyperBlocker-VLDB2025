@@ -15,7 +15,7 @@ target_include_directories(hyperdeduce PUBLIC
   ${PROJECT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/third_party/rapidcsv/src)
 
-target_link_libraries(hyperdeduce PUBLIC TBB::tbb gflags)
+target_link_libraries(hyperdeduce PUBLIC TBB::tbb gflags yaml-cpp::yaml-cpp)
 
 if(HYPERDEDUCE_WITH_CUDA)
   target_compile_definitions(hyperdeduce PUBLIC HYPERDEDUCE_WITH_CUDA=1)

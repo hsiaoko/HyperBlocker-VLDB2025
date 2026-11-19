@@ -14,13 +14,16 @@
 
 #include "hyperdeduce/backend/cpu/cpu_backend.h"
 #include "hyperdeduce/engine/engine.h"
+#include "hyperdeduce/input/rule_frontend.h"
 #include "hyperdeduce/io/csv.h"
 #ifdef HYPERDEDUCE_WITH_CUDA
 #include "hyperdeduce/backend/gpu/gpu_backend.h"
 #endif
 
 DEFINE_string(data_dir, "", "directory of <predicate>.csv base relations");
-DEFINE_string(rules, "", "path to a Datalog rules file");
+DEFINE_string(rules, "", "path to a Datalog (.dl) or legacy YAML (.yaml) rules file");
+DEFINE_string(tables, "tableA,tableB",
+              "comma-separated relation names for YAML table indices 0,1");
 DEFINE_string(output_dir, "", "directory to write derived relations");
 DEFINE_string(backend, "cpu", "execution backend: cpu or gpu");
 DEFINE_int32(gpus, 0, "number of GPUs to use (0 = all visible)");
@@ -70,7 +73,27 @@ int main(int argc, char *argv[]) {
     std::cerr << rules.status().message() << "\n";
     return 1;
   }
-  Status added = engine.AddRules(rules.value());
+  // The input module dispatches by file extension; the CLI does not branch on
+  // the format itself. Unknown extensions fall back to Datalog text.
+  std::string extension =
+      std::filesystem::path(FLAGS_rules).extension().string();
+  if (!extension.empty()) {
+    extension = extension.substr(1);
+  }
+  const hyperdeduce::RuleFrontend *frontend =
+      hyperdeduce::FrontendRegistry::Instance().ByExtension(extension);
+  if (frontend == nullptr) {
+    frontend = hyperdeduce::FrontendRegistry::Instance().ByName("datalog");
+  }
+  hyperdeduce::RuleInputContext context;
+  std::stringstream stream(FLAGS_tables);
+  std::string name;
+  while (std::getline(stream, name, ',')) {
+    if (!name.empty()) {
+      context.table_names.push_back(name);
+    }
+  }
+  Status added = engine.AddRules(rules.value(), *frontend, context);
   if (!added.ok()) {
     std::cerr << "parse failed: " << added.message() << "\n";
     return 1;

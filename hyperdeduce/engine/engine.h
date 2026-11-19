@@ -13,6 +13,7 @@
 #include "hyperdeduce/base/status.h"
 #include "hyperdeduce/catalog/catalog.h"
 #include "hyperdeduce/catalog/row_key.h"
+#include "hyperdeduce/input/rule_frontend.h"
 #include "hyperdeduce/io/csv.h"
 #include "hyperdeduce/logic/program.h"
 #include "hyperdeduce/parser/ast.h"
@@ -31,7 +32,14 @@ public:
   Status LoadCsv(const std::string &path, const std::string &name,
                  const CsvOptions &options = {});
 
+  // Convenience: parse Datalog text.
   Status AddRules(const std::string &datalog);
+
+  // Unified input path: any registered frontend parses source into the shared
+  // AST. The catalog is supplied to the context automatically for frontends
+  // that need relation schemas (e.g. YAML).
+  Status AddRules(const std::string &source, const RuleFrontend &frontend,
+                  RuleInputContext context = {});
 
   // Validates the program, infers derived schemas, and compiles a plan per rule.
   // Returns the rendered plans so a caller can inspect the chosen join order.

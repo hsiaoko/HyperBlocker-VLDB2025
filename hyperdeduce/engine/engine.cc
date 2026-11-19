@@ -4,7 +4,7 @@
 #include <utility>
 
 #include "hyperdeduce/builtin/builtin.h"
-#include "hyperdeduce/parser/parser.h"
+#include "hyperdeduce/input/datalog_frontend.h"
 #include "hyperdeduce/plan/optimizer.h"
 
 namespace hyperdeduce {
@@ -27,7 +27,14 @@ Status Engine::LoadCsv(const std::string &path, const std::string &name,
 }
 
 Status Engine::AddRules(const std::string &datalog) {
-  auto parsed = ParseProgram(datalog);
+  const DatalogFrontend frontend;
+  return AddRules(datalog, frontend);
+}
+
+Status Engine::AddRules(const std::string &source, const RuleFrontend &frontend,
+                        RuleInputContext context) {
+  context.catalog = &catalog_;
+  auto parsed = frontend.Parse(source, context);
   if (!parsed.ok()) {
     return parsed.status();
   }

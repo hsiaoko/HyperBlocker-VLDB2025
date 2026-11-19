@@ -1,5 +1,6 @@
 #include "hyperdeduce/engine/engine.h"
 
+#include <fstream>
 #include <set>
 #include <string>
 #include <utility>
@@ -7,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "hyperdeduce/backend/cpu/cpu_backend.h"
+#include "hyperdeduce/input/yaml_frontend.h"
 
 namespace hyperdeduce {
 namespace {
@@ -144,6 +146,39 @@ TEST(EngineTest, SimilarityJoinWithEqualityFirst) {
   const auto rows = StringPairs(engine, "match");
   const std::set<std::pair<std::string, std::string>> expected = {
       {"a1", "b1"}, {"a2", "b2"}};
+  EXPECT_EQ(expected, rows);
+}
+
+TEST(EngineTest, YamlRuleConvertedInternally) {
+  // YAML references loaded relations, so load the tables first (as the CLI does).
+  const std::string dir = ::testing::TempDir();
+  {
+    std::ofstream a(dir + "/yaml_tableA.csv");
+    a << "a1,martha,x,v,2020\na2,dixon,y,v,2020\n";
+    std::ofstream b(dir + "/yaml_tableB.csv");
+    b << "b1,marhta,x,v,2020\nb2,marhta,y,v,2021\n";
+  }
+  Engine engine;
+  ASSERT_TRUE(engine.LoadCsv(dir + "/yaml_tableA.csv", "tableA").ok());
+  ASSERT_TRUE(engine.LoadCsv(dir + "/yaml_tableB.csv", "tableB").ok());
+  const char yaml[] =
+      "Preconditions:\n"
+      "  Equalities:\n"
+      "    - [0, 1, 4, 4]\n"
+      "  Sim:\n"
+      "    - [0, 1, 1, 1, 2, 2]\n"
+      "  Threshold:\n"
+      "    - [0, 1, 0.81, 0.79]\n"
+      "Conseq:\n"
+      "  Equality: [0, 1, 0, 0]\n";
+  YamlFrontend frontend;
+  RuleInputContext context;
+  context.table_names = {"tableA", "tableB"};
+  ASSERT_TRUE(engine.AddRules(yaml, frontend, context).ok());
+  CpuBackend backend;
+  ASSERT_TRUE(engine.Execute(&backend).ok());
+  const auto rows = StringPairs(engine, "match");
+  const std::set<std::pair<std::string, std::string>> expected = {{"a1", "b1"}};
   EXPECT_EQ(expected, rows);
 }
 

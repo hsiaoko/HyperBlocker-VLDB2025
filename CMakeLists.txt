@@ -12,18 +12,28 @@ endif()
 option(HYPERDEDUCE_WITH_CUDA "Build the GPU backend" ON)
 option(HYPERDEDUCE_BUILD_TESTS "Build unit tests" ON)
 
+# yaml-cpp backs the legacy YAML rule frontend. Build it static and quiet,
+# before our warning flags so third-party code is not held to them.
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/yaml-cpp EXCLUDE_FROM_ALL)
+
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 find_package(TBB REQUIRED)
 find_package(gflags CONFIG REQUIRED)
 
 if(HYPERDEDUCE_WITH_CUDA)
+  # Default to the host GPU's architecture; set before enable_language so it is
+  # respected. Override with -DCMAKE_CUDA_ARCHITECTURES=... for other targets.
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES native)
+  endif()
   enable_language(CUDA)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 86)
-  endif()
   find_package(CUDAToolkit REQUIRED)
   message(STATUS "[hyperdeduce] CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
