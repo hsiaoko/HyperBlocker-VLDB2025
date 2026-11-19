@@ -1,0 +1,7 @@
+ts	phase	decision	why	evidence	result
+2026-11-19T05:45:48Z	start	begin hyperdeduce rewrite run in this session	user asked to refactor the PhD HyperBlocker repo into a clean deductive-reasoning library	this session	open
+2026-11-19T05:45:48Z	frame	done predicate: CSV+recursive Datalog gives fixpoint equal to an independent oracle, plan is explainable and data-aware, CPU/TBB and 1/4 GPU agree, gtest green, new builtin touches one registration point	a falsifiable target keeps the long run honest	docs/refactor/plan.md	open
+2026-11-19T05:45:48Z	fork	rule language is Datalog text, not YAML	user picked it; standard syntax, small parser	user answer	decided
+2026-11-19T05:45:48Z	fork	preserve paper code as tag vldb2025-paper then delete from main once new engine is green	user picked it; git history plus tag keep the artifact	git tag vldb2025-paper	decided
+2026-11-19T05:45:48Z	fork	library and namespace named hyperdeduce	user picked it over deduce	user answer	decided
+2026-11-19T05:45:48Z	scaffold	use system gtest/TBB/gflags via find_package, rapidcsv as the only submodule	all three have CMake configs installed; avoids vendoring and HTTPS submodule timeouts	ldconfig, /usr/lib/x86_64-linux-gnu/cmake	decided

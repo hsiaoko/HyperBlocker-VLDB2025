@@ -1,74 +1,38 @@
-cmake_minimum_required(VERSION 3.15)
-project(hyper_blocker LANGUAGES CXX CUDA)
+cmake_minimum_required(VERSION 3.18)
+project(hyperdeduce LANGUAGES CXX)
 
-###### Cmake options ######
-
-# Set Cmake Standard
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Set default cmake type to Debug
-if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Debug")
-else ()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
-endif ()
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
 
+option(HYPERDEDUCE_WITH_CUDA "Build the GPU backend" ON)
+option(HYPERDEDUCE_BUILD_TESTS "Build unit tests" ON)
 
-message(STATUS "[HyperBlocker] will build in type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "Using compiler: ${CMAKE_CXX_COMPILER} - ${CMAKE_CXX_COMPILER_VERSION}, ${CMAKE_CUDA_COMPILER} - ${CMAKE_CUDA_COMPILER_VERSION}")
+add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
-###### Directories shortcuts ######
-set(PROJECT_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-set(THIRD_PARTY_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
-set(EXECUTABLE_OUTPUT_PATH ${PROJECT_ROOT_DIR}/bin)
-set(LIBRARY_OUTPUT_PATH ${PROJECT_ROOT_DIR}/lib)
-set(CMAKE_MODULE_PATH ${PROJECT_ROOT_DIR}/cmake)
-set(LIBRARY_ROOT_DIR ${PROJECT_ROOT_DIR}/lib)
-
-#######################
-# Libraries
-#######################
-if (USE_JEMALLOC)
-    include("cmake/FindJemalloc.cmake" OPTIONAL)
-    if (NOT JEMALLOC_FOUND)
-        message(STATUS "jemalloc not found, build without jemalloc")
-    else ()
-        add_definitions(-DUSE_JEMALLOC)
-        include_directories(SYSTEM ${JEMALLOC_INCLUDE_DIRS})
-    endif ()
-endif ()
-
-###### Add third party to the project, if necessary ######
-# googleTest
-if (TEST)
-    enable_testing()
-    message(STATUS "Enabling GoogleTest...")
-    set(BUILD_GMOCK ON CACHE BOOL "Option: build gmock and gtest -- ON" FORCE)
-    set(INSTALL_GTEST OFF CACHE BOOL "Option: install gtest -- OFF" FORCE)
-    include_directories(SYSTEM ${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR})
-    include_directories(SYSTEM ${gmock_SOURCE_DIR}/include ${gmock_SOURCE_DIR})
-    add_subdirectory("${THIRD_PARTY_ROOT}/googletest" EXCLUDE_FROM_ALL)
-endif ()
-
-# gflags
+find_package(TBB REQUIRED)
 find_package(gflags CONFIG REQUIRED)
-include_directories(SYSTEM ${GFLAGS_INCLUDE_DIR})
 
-# yaml
-add_subdirectory("${THIRD_PARTY_ROOT}/yaml-cpp" EXCLUDE_FROM_ALL)
-include_directories(SYSTEM ${THIRD_PARTY_ROOT}/yaml-cpp/include/)
+if(HYPERDEDUCE_WITH_CUDA)
+  enable_language(CUDA)
+  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 86)
+  endif()
+  find_package(CUDAToolkit REQUIRED)
+  message(STATUS "[hyperdeduce] CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+endif()
 
-# rapidcsv
-include_directories(SYSTEM ${THIRD_PARTY_ROOT}/rapidcsv/src)
+message(STATUS "[hyperdeduce] build type: ${CMAKE_BUILD_TYPE}, CUDA: ${HYPERDEDUCE_WITH_CUDA}")
 
-#######################
-# Artifacts
-#######################
-add_subdirectory(core)
-#add_subdirectory(tools)
-add_subdirectory(examples)
+if(HYPERDEDUCE_BUILD_TESTS)
+  enable_testing()
+  find_package(GTest REQUIRED)
+endif()
 
-include_directories(
-        ${PROJECT_ROOT_DIR}
-)
+add_subdirectory(hyperdeduce)
