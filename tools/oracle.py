@@ -170,7 +170,7 @@ def infer_column(cells):
     return list(cells)
 
 
-def load_relations(data_dir):
+def load_relations(data_dir, has_header=False):
     relations = {}
     for filename in sorted(os.listdir(data_dir)):
         if not filename.endswith(".csv"):
@@ -178,6 +178,8 @@ def load_relations(data_dir):
         name = filename[:-4]
         with open(os.path.join(data_dir, filename), newline="") as handle:
             rows = list(csv.reader(handle))
+        if has_header and rows:
+            rows = rows[1:]
         if not rows:
             relations[name] = set()
             continue
@@ -360,9 +362,10 @@ def cell_text(value):
 
 def main():
     data_dir, rules_path, out_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+    has_header = len(sys.argv) > 4 and sys.argv[4] == "1"
     with open(rules_path) as handle:
         rules = parse_program(handle.read())
-    relations = load_relations(data_dir)
+    relations = load_relations(data_dir, has_header)
     result = evaluate(rules, relations)
     derived = {rule[0][0] for rule in rules}
     os.makedirs(out_dir, exist_ok=True)

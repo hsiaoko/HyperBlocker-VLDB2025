@@ -116,9 +116,11 @@ __device__ bool ApplyOp(int op, int ordering, bool comparable) {
 
 // Device similarity measures, the inner loop of a similarity join. These port
 // the HyperBlocker paper kernels (tag vldb2025-paper) as correct standard
-// measures. String length is capped at 256 characters, matching the original
-// fixed-size buffers; longer strings are truncated.
-constexpr int kMaxStringLength = 256;
+// measures. The device kernels use fixed-size scratch buffers, so strings are
+// limited to kMaxStringLength characters. The host checks the dictionary and
+// reports an error past the limit rather than silently truncating, which would
+// change scores near a threshold.
+constexpr int kMaxStringLength = 1024;
 
 __device__ double DeviceJaro(const char *a, int la, const char *b, int lb) {
   if (la == 0 && lb == 0) {
@@ -273,6 +275,32 @@ __global__ void FilterKernel(std::size_t nrows, Cell *const *cols,
   bool comparable = false;
   const int ordering = CompareCells(a, b, arg0.type, arg1.type, table, &comparable);
   keep[r] = ApplyOp(op, ordering, comparable) ? 1 : 0;
+}
+
+// Similarity in filter position: both string arguments are already bound in the
+// working tuple (e.g. after an equality join), so the measure is evaluated per
+// row rather than as a binary join. This matches the equalities-first form of
+// the original HyperBlocker rules.
+__global__ void SimFilterKernel(std::size_t nrows, Cell *const *cols, int col0,
+                                int col1, double threshold, int code,
+                                StringTable table, int *keep) {
+  const std::size_t r = blockIdx.x * blockDim.x + threadIdx.x;
+  if (r >= nrows) {
+    return;
+  }
+  const Cell id0 = cols[col0][r];
+  const Cell id1 = cols[col1][r];
+  const char *a = table.chars + table.offsets[id0];
+  const char *b = table.chars + table.offsets[id1];
+  int la = static_cast<int>(table.offsets[id0 + 1] - table.offsets[id0]);
+  int lb = static_cast<int>(table.offsets[id1 + 1] - table.offsets[id1]);
+  if (la > kMaxStringLength) {
+    la = kMaxStringLength;
+  }
+  if (lb > kMaxStringLength) {
+    lb = kMaxStringLength;
+  }
+  keep[r] = DeviceSimilarity(code, a, la, b, lb) >= threshold ? 1 : 0;
 }
 
 __global__ void ScatterKernel(std::size_t nrows, std::size_t ncols,
@@ -544,6 +572,7 @@ struct DeviceContext {
   thrust::device_vector<std::size_t> offsets;
   thrust::device_vector<char> chars;
   StringTable table;
+  std::size_t max_string_length = 0;
 };
 
 Status UploadDictionary(const Dictionary &dictionary, DeviceContext *ctx) {
@@ -552,6 +581,7 @@ Status UploadDictionary(const Dictionary &dictionary, DeviceContext *ctx) {
   for (std::size_t id = 0; id < dictionary.size(); ++id) {
     offsets[id] = chars.size();
     const std::string &text = dictionary.Lookup(id);
+    ctx->max_string_length = std::max(ctx->max_string_length, text.size());
     chars.insert(chars.end(), text.begin(), text.end());
   }
   offsets[dictionary.size()] = chars.size();
@@ -639,12 +669,37 @@ StatusOr<DeviceRelation> Compact(DeviceRelation *input,
 
 StatusOr<DeviceRelation> EvalFilter(const PhysicalOp &op, DeviceRelation *input,
                                     DeviceContext *device) {
+  const std::size_t nrows = input->nrows;
+  const BuiltinSpec *spec = BuiltinRegistry::Instance().Find(op.builtin);
+
+  // Similarity in filter position: measure(col0, col1) >= threshold.
+  if (spec != nullptr && spec->kind == BuiltinKind::kSimilarity) {
+    const int sim_code = SimilarityCode(op.builtin);
+    if (sim_code < 0 || op.filter_args.size() != 3) {
+      return Status::Error("unsupported similarity filter: " + op.builtin);
+    }
+    if (device->max_string_length > kMaxStringLength) {
+      return Status::Error("string longer than GPU similarity limit (" +
+                           std::to_string(kMaxStringLength) + " chars)");
+    }
+    const double threshold = CellToDouble(op.filter_args[2].constant);
+    thrust::device_vector<int> keep(nrows, 0);
+    if (nrows > 0) {
+      auto ptrs = ColumnPointers(input);
+      SimFilterKernel<<<BlockCount(nrows), 256>>>(
+          nrows, thrust::raw_pointer_cast(ptrs.data()), op.filter_args[0].column,
+          op.filter_args[1].column, threshold, sim_code, device->table,
+          thrust::raw_pointer_cast(keep.data()));
+      CUDA_CHECK(cudaGetLastError());
+    }
+    return Compact(input, &keep);
+  }
+
   const int code = ComparisonOpCode(op.builtin);
   if (code < 0 || op.filter_args.size() != 2) {
     return Status::Error("gpu backend supports comparison builtins only: " +
                          op.builtin);
   }
-  const std::size_t nrows = input->nrows;
   FilterArgDevice args[2];
   for (int a = 0; a < 2; ++a) {
     const FilterArg &arg = op.filter_args[a];
@@ -754,6 +809,10 @@ StatusOr<DeviceRelation> EvalSimilarityJoin(const PhysicalOp &op,
   const int code = SimilarityCode(op.measure);
   if (code < 0) {
     return Status::Error("unknown similarity measure: " + op.measure);
+  }
+  if (device->max_string_length > kMaxStringLength) {
+    return Status::Error("string longer than GPU similarity limit (" +
+                         std::to_string(kMaxStringLength) + " chars)");
   }
   const std::size_t nrows_left = left->nrows;
   const std::size_t nrows_right = right->nrows;

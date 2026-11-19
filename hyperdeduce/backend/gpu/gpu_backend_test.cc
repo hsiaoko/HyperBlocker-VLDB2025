@@ -70,6 +70,45 @@ TEST(GpuBackendTest, SimilarityJoinMatchesCpu) {
   EXPECT_EQ(expected, RunPairs(rules, &gpu4, "match"));
 }
 
+TEST(GpuBackendTest, SimilarityFilterAfterEqualityMatchesCpu) {
+  // A shared year variable makes the equality a join edge; the similarity then
+  // sits in filter position on the joined tuple (the equalities-first form).
+  const char rules[] =
+      "docA(\"a1\", \"martha\", 2020).\n"
+      "docA(\"a2\", \"martha\", 2021).\n"
+      "docB(\"b1\", \"marhta\", 2020).\n"
+      "docB(\"b2\", \"marhta\", 2021).\n"
+      "match(a, b) :- docA(a, t1, y), docB(b, t2, y), jaro_winkler(t1, t2, 0.9).";
+  CpuBackend cpu;
+  GpuBackend gpu1(1);
+  GpuBackend gpu4(4);
+  const auto expected = RunPairs(rules, &cpu, "match");
+  EXPECT_EQ(expected, RunPairs(rules, &gpu1, "match"));
+  EXPECT_EQ(expected, RunPairs(rules, &gpu4, "match"));
+}
+
+TEST(GpuBackendTest, LongStringsMatchCpu) {
+  // Strings past the old 256-char device cap: the difference lies beyond 256,
+  // so truncation would drop a pair that full-string similarity keeps.
+  std::string a(256, 'A');
+  std::string b(256, 'B');
+  for (int i = 0; i < 40; ++i) {
+    a += "common";
+    b += "common";
+  }
+  const std::string rules =
+      "docA(\"a1\", \"" + a + "\").\n" +
+      "docB(\"b1\", \"" + b + "\").\n" +
+      "match(x, y) :- docA(x, t1), docB(y, t2), jaro_winkler(t1, t2, 0.6).";
+  CpuBackend cpu;
+  GpuBackend gpu1(1);
+  GpuBackend gpu4(4);
+  const auto expected = RunPairs(rules, &cpu, "match");
+  EXPECT_EQ(1u, expected.size());
+  EXPECT_EQ(expected, RunPairs(rules, &gpu1, "match"));
+  EXPECT_EQ(expected, RunPairs(rules, &gpu4, "match"));
+}
+
 TEST(GpuBackendTest, BuiltinFilterMatchesCpu) {
   const char rules[] =
       "person(\"alice\", 20).\n"

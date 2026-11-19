@@ -21,6 +21,7 @@ def main():
     cli, data_dir, rules, work_dir = sys.argv[1:5]
     backend = sys.argv[5] if len(sys.argv) > 5 else "cpu"
     gpus = sys.argv[6] if len(sys.argv) > 6 else "0"
+    has_header = sys.argv[7] if len(sys.argv) > 7 else "0"
     out_cpp = os.path.join(work_dir, "cpp")
     out_py = os.path.join(work_dir, "py")
     os.makedirs(out_cpp, exist_ok=True)
@@ -29,10 +30,12 @@ def main():
                "--output_dir", out_cpp, "--backend", backend]
     if backend == "gpu":
         command += ["--gpus", gpus]
+    if has_header == "1":
+        command += ["--has_header"]
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(
         [sys.executable, os.path.join(os.path.dirname(__file__), "oracle.py"),
-         data_dir, rules, out_py],
+         data_dir, rules, out_py, has_header],
         check=True, stdout=subprocess.DEVNULL)
 
     failures = 0
