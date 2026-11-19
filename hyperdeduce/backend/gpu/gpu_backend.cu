@@ -114,6 +114,153 @@ __device__ bool ApplyOp(int op, int ordering, bool comparable) {
   return false;
 }
 
+// Device similarity measures, the inner loop of a similarity join. These port
+// the HyperBlocker paper kernels (tag vldb2025-paper) as correct standard
+// measures. String length is capped at 256 characters, matching the original
+// fixed-size buffers; longer strings are truncated.
+constexpr int kMaxStringLength = 256;
+
+__device__ double DeviceJaro(const char *a, int la, const char *b, int lb) {
+  if (la == 0 && lb == 0) {
+    return 1.0;
+  }
+  if (la == 0 || lb == 0) {
+    return 0.0;
+  }
+  const int max_len = la > lb ? la : lb;
+  int window = max_len / 2 - 1;
+  if (window < 0) {
+    window = 0;
+  }
+  bool am[kMaxStringLength] = {false};
+  bool bm[kMaxStringLength] = {false};
+  int matches = 0;
+  for (int i = 0; i < la; ++i) {
+    const int start = i > window ? i - window : 0;
+    const int end = (i + window + 1) < lb ? (i + window + 1) : lb;
+    for (int j = start; j < end; ++j) {
+      if (bm[j] || a[i] != b[j]) {
+        continue;
+      }
+      am[i] = true;
+      bm[j] = true;
+      ++matches;
+      break;
+    }
+  }
+  if (matches == 0) {
+    return 0.0;
+  }
+  int transpositions = 0;
+  int k = 0;
+  for (int i = 0; i < la; ++i) {
+    if (!am[i]) {
+      continue;
+    }
+    while (!bm[k]) {
+      ++k;
+    }
+    if (a[i] != b[k]) {
+      ++transpositions;
+    }
+    ++k;
+  }
+  transpositions /= 2;
+  const double m = matches;
+  return (m / la + m / lb + (m - transpositions) / m) / 3.0;
+}
+
+__device__ double DeviceJaroWinkler(const char *a, int la, const char *b, int lb) {
+  const double jaro = DeviceJaro(a, la, b, lb);
+  const int limit = (la < lb ? la : lb) < 4 ? (la < lb ? la : lb) : 4;
+  int prefix = 0;
+  while (prefix < limit && a[prefix] == b[prefix]) {
+    ++prefix;
+  }
+  const double result = jaro + prefix * 0.1 * (1.0 - jaro);
+  return result > 1.0 ? 1.0 : result;
+}
+
+__device__ double DeviceJaccard(const char *a, int la, const char *b, int lb) {
+  bool sa[256] = {false};
+  bool sb[256] = {false};
+  for (int i = 0; i < la; ++i) {
+    unsigned char c = a[i];
+    if (c >= 'A' && c <= 'Z') {
+      c += 'a' - 'A';
+    }
+    sa[c] = true;
+  }
+  for (int i = 0; i < lb; ++i) {
+    unsigned char c = b[i];
+    if (c >= 'A' && c <= 'Z') {
+      c += 'a' - 'A';
+    }
+    sb[c] = true;
+  }
+  int intersection = 0;
+  int union_size = 0;
+  for (int i = 0; i < 256; ++i) {
+    if (sa[i] && sb[i]) {
+      ++intersection;
+    }
+    if (sa[i] || sb[i]) {
+      ++union_size;
+    }
+  }
+  if (union_size == 0) {
+    return 1.0;
+  }
+  return static_cast<double>(intersection) / static_cast<double>(union_size);
+}
+
+__device__ double DeviceLevenshteinRatio(const char *a, int la, const char *b,
+                                         int lb) {
+  const int max_len = la > lb ? la : lb;
+  if (max_len == 0) {
+    return 1.0;
+  }
+  int previous[kMaxStringLength + 1];
+  int current[kMaxStringLength + 1];
+  for (int j = 0; j <= lb; ++j) {
+    previous[j] = j;
+  }
+  for (int i = 1; i <= la; ++i) {
+    current[0] = i;
+    for (int j = 1; j <= lb; ++j) {
+      const int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+      int best = previous[j] + 1;
+      if (current[j - 1] + 1 < best) {
+        best = current[j - 1] + 1;
+      }
+      if (previous[j - 1] + cost < best) {
+        best = previous[j - 1] + cost;
+      }
+      current[j] = best;
+    }
+    for (int j = 0; j <= lb; ++j) {
+      previous[j] = current[j];
+    }
+  }
+  return 1.0 - static_cast<double>(previous[lb]) / static_cast<double>(max_len);
+}
+
+// measure code: 0 jaro, 1 jaro_winkler, 2 jaccard, 3 levenshtein ratio.
+__device__ double DeviceSimilarity(int code, const char *a, int la, const char *b,
+                                   int lb) {
+  switch (code) {
+  case 0:
+    return DeviceJaro(a, la, b, lb);
+  case 1:
+    return DeviceJaroWinkler(a, la, b, lb);
+  case 2:
+    return DeviceJaccard(a, la, b, lb);
+  case 3:
+    return DeviceLevenshteinRatio(a, la, b, lb);
+  }
+  return 0.0;
+}
+
 __global__ void FilterKernel(std::size_t nrows, Cell *const *cols,
                              FilterArgDevice arg0, FilterArgDevice arg1, int op,
                              StringTable table, int *keep) {
@@ -237,6 +384,74 @@ __global__ void JoinFillKernel(std::size_t nrows_left, std::size_t left_ncols,
   }
 }
 
+__global__ void SimCountKernel(std::size_t nrows_left, std::size_t nrows_right,
+                               Cell *const *left_cols, Cell *const *right_cols,
+                               int left_key, int right_key, int code,
+                               double threshold, StringTable table, int *counts) {
+  const std::size_t r = blockIdx.x * blockDim.x + threadIdx.x;
+  if (r >= nrows_left) {
+    return;
+  }
+  const Cell lid = left_cols[left_key][r];
+  const char *a = table.chars + table.offsets[lid];
+  int la = static_cast<int>(table.offsets[lid + 1] - table.offsets[lid]);
+  if (la > kMaxStringLength) {
+    la = kMaxStringLength;
+  }
+  int count = 0;
+  for (std::size_t s = 0; s < nrows_right; ++s) {
+    const Cell rid = right_cols[right_key][s];
+    const char *b = table.chars + table.offsets[rid];
+    int lb = static_cast<int>(table.offsets[rid + 1] - table.offsets[rid]);
+    if (lb > kMaxStringLength) {
+      lb = kMaxStringLength;
+    }
+    if (DeviceSimilarity(code, a, la, b, lb) >= threshold) {
+      ++count;
+    }
+  }
+  counts[r] = count;
+}
+
+__global__ void SimFillKernel(std::size_t nrows_left, std::size_t nrows_right,
+                              std::size_t left_ncols, std::size_t right_ncols,
+                              Cell *const *left_cols, Cell *const *right_cols,
+                              int left_key, int right_key, int code,
+                              double threshold, StringTable table,
+                              const int *offsets, Cell *const *out) {
+  const std::size_t r = blockIdx.x * blockDim.x + threadIdx.x;
+  if (r >= nrows_left) {
+    return;
+  }
+  const Cell lid = left_cols[left_key][r];
+  const char *a = table.chars + table.offsets[lid];
+  int la = static_cast<int>(table.offsets[lid + 1] - table.offsets[lid]);
+  if (la > kMaxStringLength) {
+    la = kMaxStringLength;
+  }
+  int index = 0;
+  const int base = offsets[r];
+  for (std::size_t s = 0; s < nrows_right; ++s) {
+    const Cell rid = right_cols[right_key][s];
+    const char *b = table.chars + table.offsets[rid];
+    int lb = static_cast<int>(table.offsets[rid + 1] - table.offsets[rid]);
+    if (lb > kMaxStringLength) {
+      lb = kMaxStringLength;
+    }
+    if (DeviceSimilarity(code, a, la, b, lb) < threshold) {
+      continue;
+    }
+    const int out_row = base + index;
+    ++index;
+    for (std::size_t c = 0; c < left_ncols; ++c) {
+      out[c][out_row] = left_cols[c][r];
+    }
+    for (std::size_t c = 0; c < right_ncols; ++c) {
+      out[left_ncols + c][out_row] = right_cols[c][s];
+    }
+  }
+}
+
 __global__ void DedupMarkKernel(std::size_t nrows, std::size_t ncols,
                                 Cell *const *cols, const int *perm, int *keep) {
   const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -312,6 +527,14 @@ int ComparisonOpCode(const std::string &name) {
   if (name == "<=") return 3;
   if (name == ">") return 4;
   if (name == ">=") return 5;
+  return -1;
+}
+
+int SimilarityCode(const std::string &name) {
+  if (name == "jaro") return 0;
+  if (name == "jaro_winkler") return 1;
+  if (name == "jaccard") return 2;
+  if (name == "levenshtein") return 3;
   return -1;
 }
 
@@ -524,6 +747,58 @@ StatusOr<DeviceRelation> EvalJoin(const PhysicalOp &op, DeviceRelation *left,
   return output;
 }
 
+StatusOr<DeviceRelation> EvalSimilarityJoin(const PhysicalOp &op,
+                                            DeviceRelation *left,
+                                            DeviceRelation *right,
+                                            DeviceContext *device) {
+  const int code = SimilarityCode(op.measure);
+  if (code < 0) {
+    return Status::Error("unknown similarity measure: " + op.measure);
+  }
+  const std::size_t nrows_left = left->nrows;
+  const std::size_t nrows_right = right->nrows;
+  const std::size_t out_cols = op.output_schema.size();
+
+  auto left_ptrs = ColumnPointers(left);
+  auto right_ptrs = ColumnPointers(right);
+
+  thrust::device_vector<int> counts(nrows_left, 0);
+  thrust::device_vector<int> offsets(nrows_left + 1, 0);
+  std::size_t total = 0;
+  if (nrows_left > 0 && nrows_right > 0) {
+    SimCountKernel<<<BlockCount(nrows_left), 256>>>(
+        nrows_left, nrows_right, thrust::raw_pointer_cast(left_ptrs.data()),
+        thrust::raw_pointer_cast(right_ptrs.data()), op.left_key, op.right_key,
+        code, op.sim_threshold, device->table,
+        thrust::raw_pointer_cast(counts.data()));
+    CUDA_CHECK(cudaGetLastError());
+    thrust::exclusive_scan(counts.begin(), counts.end(), offsets.begin());
+    total = static_cast<std::size_t>(offsets[nrows_left - 1]) +
+            static_cast<std::size_t>(counts[nrows_left - 1]);
+    offsets[nrows_left] = static_cast<int>(total);
+  }
+
+  DeviceRelation output;
+  output.schema = op.output_schema;
+  output.nrows = total;
+  output.columns.resize(out_cols);
+  for (std::size_t c = 0; c < out_cols; ++c) {
+    output.columns[c].resize(total);
+  }
+  if (total > 0) {
+    auto out_ptrs = ColumnPointers(&output);
+    SimFillKernel<<<BlockCount(nrows_left), 256>>>(
+        nrows_left, nrows_right, left->columns.size(), right->columns.size(),
+        thrust::raw_pointer_cast(left_ptrs.data()),
+        thrust::raw_pointer_cast(right_ptrs.data()), op.left_key, op.right_key,
+        code, op.sim_threshold, device->table,
+        thrust::raw_pointer_cast(offsets.data()),
+        thrust::raw_pointer_cast(out_ptrs.data()));
+    CUDA_CHECK(cudaGetLastError());
+  }
+  return output;
+}
+
 StatusOr<DeviceRelation> EvalProject(const PhysicalOp &op, DeviceRelation *input) {
   DeviceRelation output;
   output.schema = op.output_schema;
@@ -592,6 +867,8 @@ StatusOr<DeviceRelation> EvalOp(const PhysicalOp &op, const ExecutionContext &ct
     return EvalFilter(op, &inputs.at(0), device);
   case OpKind::kHashJoin:
     return EvalJoin(op, &inputs.at(0), &inputs.at(1));
+  case OpKind::kSimilarityJoin:
+    return EvalSimilarityJoin(op, &inputs.at(0), &inputs.at(1), device);
   case OpKind::kProject:
     return EvalProject(op, &inputs.at(0));
   case OpKind::kDedup:

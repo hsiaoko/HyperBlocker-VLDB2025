@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "hyperdeduce/builtin/similarity.h"
+
 namespace hyperdeduce {
 namespace {
 
@@ -71,6 +73,30 @@ BuiltinSpec MakeComparison(const std::string &name, CompareOp op) {
   return spec;
 }
 
+// A similarity builtin is a binary predicate over (x, y) with a trailing
+// threshold parameter. Its measure drives a similarity join; the bool eval is
+// the degenerate filter form used when both arguments are already bound.
+BuiltinSpec MakeSimilarity(const std::string &name, SimilarityMeasure measure) {
+  BuiltinSpec spec;
+  spec.name = name;
+  spec.arity = 3;
+  spec.kind = BuiltinKind::kSimilarity;
+  spec.measure = measure;
+  spec.eval = [measure](const std::vector<Cell> &args,
+                        const std::vector<DataType> &types,
+                        const Dictionary &dictionary) {
+    if (types[0] != DataType::kString || types[1] != DataType::kString) {
+      return false;
+    }
+    const double threshold = types[2] == DataType::kInt64
+                                 ? static_cast<double>(CellToInt64(args[2]))
+                                 : CellToDouble(args[2]);
+    return measure(dictionary.Lookup(args[0]), dictionary.Lookup(args[1])) >=
+           threshold;
+  };
+  return spec;
+}
+
 } // namespace
 
 BuiltinRegistry &BuiltinRegistry::Instance() {
@@ -85,6 +111,13 @@ BuiltinRegistry::BuiltinRegistry() {
   Register(MakeComparison("<=", CompareOp::kLe));
   Register(MakeComparison(">", CompareOp::kGt));
   Register(MakeComparison(">=", CompareOp::kGe));
+  Register(MakeSimilarity("jaro", Jaro));
+  Register(MakeSimilarity("jaro_winkler",
+                          [](const std::string &a, const std::string &b) {
+                            return JaroWinkler(a, b);
+                          }));
+  Register(MakeSimilarity("jaccard", Jaccard));
+  Register(MakeSimilarity("levenshtein", LevenshteinRatio));
 }
 
 void BuiltinRegistry::Register(BuiltinSpec spec) {

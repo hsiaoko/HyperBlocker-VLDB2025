@@ -12,6 +12,8 @@ const char *OpKindName(OpKind kind) {
     return "Filter";
   case OpKind::kHashJoin:
     return "HashJoin";
+  case OpKind::kSimilarityJoin:
+    return "SimilarityJoin";
   case OpKind::kProject:
     return "Project";
   case OpKind::kDedup:
@@ -43,6 +45,9 @@ void ExplainNode(const PhysicalOp &op, int depth, std::ostringstream *out) {
     break;
   case OpKind::kHashJoin:
     *out << " keys=" << op.left_keys.size();
+    break;
+  case OpKind::kSimilarityJoin:
+    *out << " " << op.measure << ">=" << op.sim_threshold;
     break;
   default:
     break;

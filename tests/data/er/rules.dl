@@ -1,0 +1,3 @@
+match_jw(a, b) :- docA(a, t1), docB(b, t2), jaro_winkler(t1, t2, 0.85).
+match_jaccard(a, b) :- docA(a, t1), docB(b, t2), jaccard(t1, t2, 0.5).
+match_lev(a, b) :- docA(a, t1), docB(b, t2), levenshtein(t1, t2, 0.6).

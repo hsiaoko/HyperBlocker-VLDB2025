@@ -213,6 +213,77 @@ def apply_op(op, a, b):
     return False
 
 
+def jaro(a, b):
+    la, lb = len(a), len(b)
+    if la == 0 and lb == 0:
+        return 1.0
+    if la == 0 or lb == 0:
+        return 0.0
+    window = max(0, max(la, lb) // 2 - 1)
+    am, bm = [False] * la, [False] * lb
+    m = 0
+    for i in range(la):
+        for j in range(max(0, i - window), min(i + window + 1, lb)):
+            if bm[j] or a[i] != b[j]:
+                continue
+            am[i] = bm[j] = True
+            m += 1
+            break
+    if m == 0:
+        return 0.0
+    t, k = 0, 0
+    for i in range(la):
+        if not am[i]:
+            continue
+        while not bm[k]:
+            k += 1
+        if a[i] != b[k]:
+            t += 1
+        k += 1
+    t //= 2
+    return (m / la + m / lb + (m - t) / m) / 3.0
+
+
+def jaro_winkler(a, b):
+    j = jaro(a, b)
+    prefix = 0
+    for x, y in zip(a[:4], b[:4]):
+        if x != y:
+            break
+        prefix += 1
+    return min(1.0, j + prefix * 0.1 * (1.0 - j))
+
+
+def jaccard(a, b):
+    sa, sb = set(a.lower()), set(b.lower())
+    union = sa | sb
+    if not union:
+        return 1.0
+    return len(sa & sb) / len(union)
+
+
+def levenshtein_ratio(a, b):
+    la, lb = len(a), len(b)
+    if max(la, lb) == 0:
+        return 1.0
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        prev = cur
+    return 1.0 - prev[lb] / max(la, lb)
+
+
+SIMILARITY = {
+    "jaro": jaro,
+    "jaro_winkler": jaro_winkler,
+    "jaccard": jaccard,
+    "levenshtein": levenshtein_ratio,
+}
+
+
 def eval_rule(rule, relations):
     head, body = rule
     bindings = [{}]
@@ -223,6 +294,16 @@ def eval_rule(rule, relations):
                 a = resolve(terms[0], binding)
                 b = resolve(terms[1], binding)
                 if apply_op(pred, a, b):
+                    kept.append(binding)
+            bindings = kept
+            continue
+        if pred in SIMILARITY:
+            kept = []
+            for binding in bindings:
+                a = str(resolve(terms[0], binding))
+                b = str(resolve(terms[1], binding))
+                threshold = resolve(terms[2], binding)
+                if SIMILARITY[pred](a, b) >= threshold:
                     kept.append(binding)
             bindings = kept
             continue

@@ -175,6 +175,64 @@ StatusOr<Relation> EvalJoin(const PhysicalOp &op, const Relation &left,
   return output;
 }
 
+StatusOr<Relation> EvalSimilarityJoin(const PhysicalOp &op, const Relation &left,
+                                      const Relation &right,
+                                      const ExecutionContext &ctx) {
+  const BuiltinSpec *spec = BuiltinRegistry::Instance().Find(op.measure);
+  if (spec == nullptr || !spec->measure) {
+    return Status::Error("unknown similarity measure: " + op.measure);
+  }
+  const SimilarityMeasure &measure = spec->measure;
+  const Dictionary &dictionary = ctx.dictionary();
+  const std::size_t left_cols = left.num_columns();
+  const std::size_t out_cols = op.output_schema.size();
+
+  // Resolve the right key text once per row instead of once per pair.
+  std::vector<std::string> right_text(right.num_rows());
+  for (std::size_t s = 0; s < right.num_rows(); ++s) {
+    right_text[s] = dictionary.Lookup(right.at(op.right_key, s));
+  }
+
+  tbb::enumerable_thread_specific<std::vector<std::vector<Cell>>> locals;
+  tbb::parallel_for(tbb::blocked_range<std::size_t>(0, left.num_rows()),
+                    [&](const tbb::blocked_range<std::size_t> &range) {
+    auto &buffer = locals.local();
+    if (buffer.empty()) {
+      buffer.resize(out_cols);
+    }
+    for (std::size_t r = range.begin(); r != range.end(); ++r) {
+      const std::string left_text = dictionary.Lookup(left.at(op.left_key, r));
+      for (std::size_t s = 0; s < right.num_rows(); ++s) {
+        if (measure(left_text, right_text[s]) < op.sim_threshold) {
+          continue;
+        }
+        for (std::size_t c = 0; c < left_cols; ++c) {
+          buffer[c].push_back(left.at(c, r));
+        }
+        for (std::size_t c = 0; c < right.num_columns(); ++c) {
+          buffer[left_cols + c].push_back(right.at(c, s));
+        }
+      }
+    }
+  });
+
+  std::size_t nrows = 0;
+  for (const auto &buffer : locals) {
+    if (!buffer.empty()) {
+      nrows += buffer[0].size();
+    }
+  }
+  std::vector<std::vector<Cell>> columns(out_cols);
+  for (auto &buffer : locals) {
+    for (std::size_t c = 0; c < out_cols; ++c) {
+      columns[c].insert(columns[c].end(), buffer[c].begin(), buffer[c].end());
+    }
+  }
+  Relation output("", ToSchema(op.output_schema));
+  output.AppendColumns(columns, nrows);
+  return output;
+}
+
 StatusOr<Relation> EvalProject(const PhysicalOp &op, const Relation &input) {
   const std::size_t nrows = input.num_rows();
   const std::size_t ncols = op.project_columns.size();
@@ -228,6 +286,8 @@ StatusOr<Relation> EvalOp(const PhysicalOp &op, const ExecutionContext &ctx) {
     return EvalFilter(op, inputs.at(0), ctx);
   case OpKind::kHashJoin:
     return EvalJoin(op, inputs.at(0), inputs.at(1));
+  case OpKind::kSimilarityJoin:
+    return EvalSimilarityJoin(op, inputs.at(0), inputs.at(1), ctx);
   case OpKind::kProject:
     return EvalProject(op, inputs.at(0));
   case OpKind::kDedup:

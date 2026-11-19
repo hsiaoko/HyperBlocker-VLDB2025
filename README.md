@@ -62,6 +62,21 @@ sibling(x, y) :- parent(p, x), parent(p, y), x != y.
 Recursion is evaluated with semi-naive iteration. Mutually recursive predicates
 are grouped into strata and evaluated in dependency order.
 
+### Similarity joins
+
+String similarity is a binary join predicate, not a post-filter. The measures
+ported from the HyperBlocker paper artifact are `jaro`, `jaro_winkler`,
+`jaccard`, and `levenshtein` (normalized ratio). The trailing number is a
+threshold parameter.
+
+```
+match(a, b) :- docA(a, t1), docB(b, t2), jaro_winkler(t1, t2, 0.89).
+```
+
+A similarity atom is a theta-join with a similarity condition. The optimizer
+schedules it by cost like other joins, preferring cheap equality joins first,
+and runs it on both the CPU and GPU backends.
+
 ## Library API
 
 ```cpp

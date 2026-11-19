@@ -14,6 +14,8 @@
 namespace hyperdeduce {
 namespace {
 
+#ifdef HYPERDEDUCE_WITH_CUDA
+
 std::set<std::pair<std::string, std::string>> RunPairs(
     const std::string &rules, Backend *backend, const std::string &name) {
   Engine engine;
@@ -37,8 +39,6 @@ const char kClosureRules[] =
     "ancestor(x, y) :- parent(x, y).\n"
     "ancestor(x, z) :- parent(x, y), ancestor(y, z).";
 
-#ifdef HYPERDEDUCE_WITH_CUDA
-
 TEST(GpuBackendTest, MatchesCpuOnTransitiveClosure) {
   CpuBackend cpu;
   GpuBackend gpu(1);
@@ -51,6 +51,23 @@ TEST(GpuBackendTest, FourDevicesMatchCpu) {
   GpuBackend gpu(4);
   EXPECT_EQ(RunPairs(kClosureRules, &cpu, "ancestor"),
             RunPairs(kClosureRules, &gpu, "ancestor"));
+}
+
+TEST(GpuBackendTest, SimilarityJoinMatchesCpu) {
+  const char rules[] =
+      "docA(\"a1\", \"martha\").\n"
+      "docA(\"a2\", \"dixon\").\n"
+      "docA(\"a3\", \"algorithm\").\n"
+      "docB(\"b1\", \"marhta\").\n"
+      "docB(\"b2\", \"dicksonx\").\n"
+      "docB(\"b3\", \"algorithm\").\n"
+      "match(a, b) :- docA(a, t1), docB(b, t2), jaro_winkler(t1, t2, 0.85).";
+  CpuBackend cpu;
+  GpuBackend gpu1(1);
+  GpuBackend gpu4(4);
+  const auto expected = RunPairs(rules, &cpu, "match");
+  EXPECT_EQ(expected, RunPairs(rules, &gpu1, "match"));
+  EXPECT_EQ(expected, RunPairs(rules, &gpu4, "match"));
 }
 
 TEST(GpuBackendTest, BuiltinFilterMatchesCpu) {

@@ -9,7 +9,7 @@
 
 namespace hyperdeduce {
 
-enum class OpKind { kScan, kFilter, kHashJoin, kProject, kDedup };
+enum class OpKind { kScan, kFilter, kHashJoin, kSimilarityJoin, kProject, kDedup };
 
 // One column of a working relation: the variable it binds and its type.
 struct Column {
@@ -57,6 +57,15 @@ struct PhysicalOp {
   // columns that are not join keys.
   std::vector<int> left_keys;
   std::vector<int> right_keys;
+
+  // kSimilarityJoin: a binary theta-join whose condition is measure(left_key,
+  // right_key) >= sim_threshold. A sibling of kHashJoin, not a filter. The
+  // output keeps all left columns plus all right columns (the two string keys
+  // are not equated, so both remain).
+  std::string measure;
+  double sim_threshold = 0;
+  int left_key = -1;
+  int right_key = -1;
 
   // kProject: produce project_columns from the single input.
   std::vector<ProjectColumn> project_columns;

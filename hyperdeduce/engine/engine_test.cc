@@ -111,5 +111,41 @@ TEST(EngineTest, MutualRecursionFixpoint) {
   EXPECT_EQ(1u, engine.GetRelation("odd")->num_rows());
 }
 
+TEST(EngineTest, SimilarityJoinIsABinaryOperator) {
+  Engine engine;
+  ASSERT_TRUE(engine.AddRules(
+      "docA(\"a1\", \"martha\").\n"
+      "docA(\"a2\", \"dixon\").\n"
+      "docB(\"b1\", \"marhta\").\n"
+      "docB(\"b2\", \"dicksonx\").\n"
+      "match(a, b) :- docA(a, t1), docB(b, t2), jaro_winkler(t1, t2, 0.9).").ok());
+  auto plan = engine.BuildPlan();
+  ASSERT_TRUE(plan.ok()) << plan.status().message();
+  EXPECT_NE(std::string::npos, plan.value().find("SimilarityJoin"));
+
+  CpuBackend backend;
+  ASSERT_TRUE(engine.Execute(&backend).ok());
+  const auto rows = StringPairs(engine, "match");
+  const std::set<std::pair<std::string, std::string>> expected = {{"a1", "b1"}};
+  EXPECT_EQ(expected, rows);
+}
+
+TEST(EngineTest, SimilarityJoinWithEqualityFirst) {
+  // An equality join on year narrows candidates before the similarity join.
+  Engine engine;
+  ASSERT_TRUE(engine.AddRules(
+      "docA(\"a1\", \"martha\", 2020).\n"
+      "docA(\"a2\", \"martha\", 2021).\n"
+      "docB(\"b1\", \"marhta\", 2020).\n"
+      "docB(\"b2\", \"marhta\", 2021).\n"
+      "match(a, b) :- docA(a, t1, y), docB(b, t2, y), jaro_winkler(t1, t2, 0.9).").ok());
+  CpuBackend backend;
+  ASSERT_TRUE(engine.Execute(&backend).ok());
+  const auto rows = StringPairs(engine, "match");
+  const std::set<std::pair<std::string, std::string>> expected = {
+      {"a1", "b1"}, {"a2", "b2"}};
+  EXPECT_EQ(expected, rows);
+}
+
 } // namespace
 } // namespace hyperdeduce

@@ -45,6 +45,20 @@ struct AtomPlan {
   double est = 1;
 };
 
+// A similarity atom is a binary join edge between the atoms binding var_x and
+// var_y, with a similarity theta rather than equality.
+struct SimAtom {
+  const BuiltinSpec *spec = nullptr;
+  std::string var_x;
+  std::string var_y;
+  double threshold = 0;
+  bool consumed = false;
+};
+
+// Similarity joins are expensive per pair; a default selectivity keeps the
+// optimizer preferring cheap equality joins first (equalities-first emerges).
+constexpr double kSimilaritySelectivity = 0.1;
+
 std::unique_ptr<PhysicalOp> MakeUnitScan() {
   auto scan = std::make_unique<PhysicalOp>();
   scan->kind = OpKind::kScan;
@@ -195,6 +209,27 @@ std::unique_ptr<PhysicalOp> MakeJoin(std::unique_ptr<PhysicalOp> left,
   return join;
 }
 
+std::unique_ptr<PhysicalOp> MakeSimilarityJoin(std::unique_ptr<PhysicalOp> left,
+                                               AtomPlan &right,
+                                               const std::vector<Column> &left_schema,
+                                               const SimAtom &sim, int left_key,
+                                               int right_key, double est) {
+  auto join = std::make_unique<PhysicalOp>();
+  join->kind = OpKind::kSimilarityJoin;
+  join->est_rows = est;
+  join->measure = sim.spec->name;
+  join->sim_threshold = sim.threshold;
+  join->left_key = left_key;
+  join->right_key = right_key;
+  join->output_schema = left_schema;
+  for (const Column &column : right.schema) {
+    join->output_schema.push_back(column);
+  }
+  join->inputs.push_back(std::move(left));
+  join->inputs.push_back(std::move(right.op));
+  return join;
+}
+
 } // namespace
 
 StatusOr<std::unique_ptr<PhysicalOp>> BuildRulePlan(
@@ -203,11 +238,33 @@ StatusOr<std::unique_ptr<PhysicalOp>> BuildRulePlan(
   std::unordered_map<std::string, DataType> var_types;
   std::vector<AtomPlan> atoms;
   std::vector<const Atom *> builtins;
+  std::vector<SimAtom> sims;
 
   int relational_index = 0;
   for (const Atom &atom : rule.body) {
     if (BuiltinRegistry::Instance().IsBuiltin(atom.predicate)) {
-      builtins.push_back(&atom);
+      const BuiltinSpec *spec = BuiltinRegistry::Instance().Find(atom.predicate);
+      if (spec->kind == BuiltinKind::kSimilarity) {
+        if (atom.terms.size() != 3 || !atom.terms[0].is_variable ||
+            !atom.terms[1].is_variable || atom.terms[2].is_variable) {
+          return Status::Error("similarity atom needs two variables and a "
+                               "constant threshold: " + atom.predicate);
+        }
+        const Constant &threshold = atom.terms[2].constant;
+        if (threshold.type == DataType::kString) {
+          return Status::Error("similarity threshold must be numeric");
+        }
+        SimAtom sim;
+        sim.spec = spec;
+        sim.var_x = atom.terms[0].variable;
+        sim.var_y = atom.terms[1].variable;
+        sim.threshold = threshold.type == DataType::kInt64
+                            ? static_cast<double>(threshold.int_value)
+                            : threshold.double_value;
+        sims.push_back(std::move(sim));
+      } else {
+        builtins.push_back(&atom);
+      }
       continue;
     }
     const bool delta = relational_index == delta_relational_index;
@@ -242,10 +299,18 @@ StatusOr<std::unique_ptr<PhysicalOp>> BuildRulePlan(
     bound = atoms[first].vars;
     current = std::move(atoms[first].op);
 
+    // Connection rank encodes cost: equality join (0) is cheaper than a
+    // similarity join (1), which is cheaper than a cross product (2). The
+    // optimizer prefers the cheapest connection, then the smallest estimate.
     for (std::size_t step = 1; step < atoms.size(); ++step) {
       int best = -1;
+      int best_rank = 3;
       double best_est = 0;
-      bool best_connected = false;
+      int best_sim = -1;
+      int best_left_key = -1;
+      int best_right_key = -1;
+      std::unordered_set<std::string> best_shared;
+
       for (std::size_t i = 0; i < atoms.size(); ++i) {
         if (used[i]) {
           continue;
@@ -256,32 +321,95 @@ StatusOr<std::unique_ptr<PhysicalOp>> BuildRulePlan(
             shared.insert(var);
           }
         }
-        const bool connected = !shared.empty();
-        const double est =
-            connected ? current_est * atoms[i].est * JoinSelectivity(atoms[i], shared)
-                      : current_est * atoms[i].est;
-        if (best == -1 || (connected && !best_connected) ||
-            (connected == best_connected && est < best_est)) {
+
+        int rank = 2;
+        int sim_index = -1;
+        int left_key = -1;
+        int right_key = -1;
+        double est = current_est * atoms[i].est;
+        if (!shared.empty()) {
+          rank = 0;
+          est = current_est * atoms[i].est * JoinSelectivity(atoms[i], shared);
+        } else {
+          for (std::size_t s = 0; s < sims.size(); ++s) {
+            if (sims[s].consumed) {
+              continue;
+            }
+            const SimAtom &sim = sims[s];
+            if (bound.count(sim.var_x) != 0 && atoms[i].vars.count(sim.var_y) != 0) {
+              rank = 1;
+              sim_index = static_cast<int>(s);
+              left_key = FindColumn(current_schema, sim.var_x);
+              right_key = FindColumn(atoms[i].schema, sim.var_y);
+            } else if (bound.count(sim.var_y) != 0 &&
+                       atoms[i].vars.count(sim.var_x) != 0) {
+              rank = 1;
+              sim_index = static_cast<int>(s);
+              left_key = FindColumn(current_schema, sim.var_y);
+              right_key = FindColumn(atoms[i].schema, sim.var_x);
+            } else {
+              continue;
+            }
+            est = current_est * atoms[i].est * kSimilaritySelectivity;
+            break;
+          }
+        }
+
+        if (best == -1 || rank < best_rank ||
+            (rank == best_rank && est < best_est)) {
           best = static_cast<int>(i);
+          best_rank = rank;
           best_est = est;
-          best_connected = connected;
+          best_sim = sim_index;
+          best_left_key = left_key;
+          best_right_key = right_key;
+          best_shared = std::move(shared);
         }
       }
+
       used[best] = true;
-      std::unordered_set<std::string> shared;
-      for (const std::string &var : atoms[best].vars) {
-        if (bound.count(var) != 0) {
-          shared.insert(var);
-        }
+      if (best_rank == 1) {
+        sims[best_sim].consumed = true;
+        current = MakeSimilarityJoin(std::move(current), atoms[best],
+                                     current_schema, sims[best_sim],
+                                     best_left_key, best_right_key,
+                                     FloorRows(best_est));
+      } else {
+        current = MakeJoin(std::move(current), atoms[best], current_schema,
+                           best_shared, FloorRows(best_est));
       }
-      current = MakeJoin(std::move(current), atoms[best], current_schema, shared,
-                         FloorRows(best_est));
       current_schema = current->output_schema;
       current_est = FloorRows(best_est);
       for (const std::string &var : atoms[best].vars) {
         bound.insert(var);
       }
     }
+  }
+
+  // A similarity atom whose two variables ended up bound in the same working
+  // relation (not used as a join edge) degenerates to a filter.
+  for (const SimAtom &sim : sims) {
+    if (sim.consumed) {
+      continue;
+    }
+    const int col_x = FindColumn(current_schema, sim.var_x);
+    const int col_y = FindColumn(current_schema, sim.var_y);
+    if (col_x < 0 || col_y < 0) {
+      return Status::Error("similarity variable not bound: " + sim.var_x);
+    }
+    const double sim_est = current_est * kSimilaritySelectivity;
+    auto filter = std::make_unique<PhysicalOp>();
+    filter->kind = OpKind::kFilter;
+    filter->builtin = sim.spec->name;
+    filter->output_schema = current_schema;
+    filter->est_rows = sim_est;
+    filter->filter_args.push_back(FilterArg{false, col_x, 0, var_types[sim.var_x]});
+    filter->filter_args.push_back(FilterArg{false, col_y, 0, var_types[sim.var_y]});
+    filter->filter_args.push_back(
+        FilterArg{true, -1, DoubleToCell(sim.threshold), DataType::kDouble});
+    filter->inputs.push_back(std::move(current));
+    current = std::move(filter);
+    current_est = sim_est;
   }
 
   // Builtin comparisons once their variables are bound.

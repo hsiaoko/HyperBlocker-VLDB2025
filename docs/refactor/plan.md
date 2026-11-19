@@ -93,10 +93,12 @@ predicate, and stops when a round derives nothing new.
 ## Scope of this rewrite
 
 Version one covers positive Datalog, builtin comparisons, recursion through
-semi-naive evaluation, and CPU plus multi-GPU execution. Negation, aggregation,
-and the old string-similarity predicates are out of scope; the registry and
-operator seams leave room for them. Performance tuning is not promised here; any
-speedup claim must pass the benchmark checklist first.
+semi-naive evaluation, and CPU plus multi-GPU execution. String similarity
+(Jaro, Jaro-Winkler, Jaccard, Levenshtein) is a binary similarity-join operator,
+a sibling of the hash join, scheduled by cost and run on both backends. Negation
+and aggregation remain out of scope; the registry and operator seams leave room
+for them. Performance tuning is not promised here; any speedup claim must pass
+the benchmark checklist first.
 
 ## Phases
 

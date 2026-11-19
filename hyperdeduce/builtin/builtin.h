@@ -19,10 +19,20 @@ using BuiltinEval = std::function<bool(const std::vector<Cell> &args,
                                        const std::vector<DataType> &types,
                                        const Dictionary &dictionary)>;
 
+// A similarity measure maps two strings to a score in [0, 1]. It is the inner
+// loop of a similarity join, not a row filter.
+using SimilarityMeasure =
+    std::function<double(const std::string &, const std::string &)>;
+
+enum class BuiltinKind { kComparison, kSimilarity };
+
 struct BuiltinSpec {
   std::string name;
   std::size_t arity = 0;
+  BuiltinKind kind = BuiltinKind::kComparison;
   BuiltinEval eval;
+  // Set for kSimilarity: the binary measure used by a similarity join.
+  SimilarityMeasure measure;
 };
 
 // The single registration point for builtin predicates. Comparisons register
