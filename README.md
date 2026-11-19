@@ -96,6 +96,13 @@ build/examples/hyperdeduce --data_dir . --rules rule.yaml --backend gpu --has_he
 `tools/yaml2datalog.py` remains as a standalone YAML-to-Datalog translator if you
 want the Datalog text explicitly.
 
+### Worked example
+
+[docs/entity-resolution.md](docs/entity-resolution.md) walks through entity
+resolution end to end, blocking on year then joining on title and author
+similarity, in both Datalog and YAML, on CPU and GPU, with multiple queries
+sharing work. The runnable data and rules are in `examples/entity_resolution/`.
+
 ## Library API
 
 ```cpp

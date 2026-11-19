@@ -1,0 +1,16 @@
+# Original HyperBlocker YAML rule format, equivalent to rule.dl.
+# Tables are referenced by index: 0 = dblp, 1 = acm (set --tables dblp,acm).
+# Columns: 0=id, 1=title, 2=authors, 3=venue, 4=year.
+Preconditions:
+  Relations:
+    - [0, 0, 1, 2, 3, 4]
+    - [1, 0, 1, 2, 3, 4]
+  Equalities:
+    - [0, 1, 4, 4]          # dblp.year == acm.year (blocking)
+  Sim:
+    - [0, 1, 1, 1, 2, 2]    # title~title, authors~authors (Jaro-Winkler)
+  Threshold:
+    - [0, 1, 0.81, 0.79]    # title >= 0.81, authors >= 0.79
+Conseq:
+  Option: Equality
+  Equality: [0, 1, 0, 0]    # output (dblp.id, acm.id)

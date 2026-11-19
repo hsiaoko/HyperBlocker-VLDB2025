@@ -1,0 +1,4 @@
+id,title,authors,venue,year
+a1,adaptive query procesing,m smith jones,vldb,2020
+a2,graph index techniques,a b c,dasfaa,2019
+a3,entity resolution survey,p q r,sigmod,2021

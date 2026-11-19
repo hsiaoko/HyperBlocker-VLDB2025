@@ -1,0 +1,8 @@
+// Entity resolution: match DBLP and ACM records.
+// Block on equal year (shared variable), then require title and authors
+// Jaro-Winkler similarity above threshold.
+match(dblp_id, acm_id) :-
+  dblp(dblp_id, t1, a1, v1, year),
+  acm(acm_id, t2, a2, v2, year),
+  jaro_winkler(t1, t2, 0.81),
+  jaro_winkler(a1, a2, 0.79).
