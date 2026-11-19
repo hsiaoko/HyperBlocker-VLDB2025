@@ -1,5 +1,8 @@
 #include "hyperdeduce/backend/cpu/cpu_backend.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -187,6 +190,9 @@ StatusOr<Relation> EvalSimilarityJoin(const PhysicalOp &op, const Relation &left
   const std::size_t left_cols = left.num_columns();
   const std::size_t out_cols = op.output_schema.size();
 
+  const bool bench = std::getenv("HYPERDEDUCE_BENCH") != nullptr;
+  const auto bench_start = std::chrono::steady_clock::now();
+
   // Resolve the right key text once per row instead of once per pair.
   std::vector<std::string> right_text(right.num_rows());
   for (std::size_t s = 0; s < right.num_rows(); ++s) {
@@ -230,6 +236,13 @@ StatusOr<Relation> EvalSimilarityJoin(const PhysicalOp &op, const Relation &left
   }
   Relation output("", ToSchema(op.output_schema));
   output.AppendColumns(columns, nrows);
+  if (bench) {
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - bench_start).count();
+    std::fprintf(stderr,
+                 "[bench] cpu similarity_join measure=%s ms=%.3f pairs=%zu out=%zu\n",
+                 op.measure.c_str(), ms, left.num_rows() * right.num_rows(), nrows);
+  }
   return output;
 }
 

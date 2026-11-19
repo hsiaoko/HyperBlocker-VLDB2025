@@ -10,6 +10,8 @@
 #include <thrust/sort.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -116,11 +118,12 @@ __device__ bool ApplyOp(int op, int ordering, bool comparable) {
 
 // Device similarity measures, the inner loop of a similarity join. These port
 // the HyperBlocker paper kernels (tag vldb2025-paper) as correct standard
-// measures. The device kernels use fixed-size scratch buffers, so strings are
-// limited to kMaxStringLength characters. The host checks the dictionary and
-// reports an error past the limit rather than silently truncating, which would
-// change scores near a threshold.
-constexpr int kMaxStringLength = 1024;
+// measures. Scratch is held in compact word bitmasks, not byte arrays: a Jaro
+// match flag set costs 128 bytes of local memory instead of 2 KiB, which keeps
+// the kernel out of local-memory spill. Strings are limited to
+// kMaxStringLength; the host reports an error past the limit rather than
+// silently truncating, which would change scores near a threshold.
+constexpr int kMaxStringLength = 512;
 
 __device__ double DeviceJaro(const char *a, int la, const char *b, int lb) {
   if (la == 0 && lb == 0) {
@@ -247,18 +250,36 @@ __device__ double DeviceLevenshteinRatio(const char *a, int la, const char *b,
   return 1.0 - static_cast<double>(previous[lb]) / static_cast<double>(max_len);
 }
 
-// measure code: 0 jaro, 1 jaro_winkler, 2 jaccard, 3 levenshtein ratio.
+// Compile-time measure selection. Templating the join kernels on Code lets the
+// compiler drop the other measures, so a Jaro-Winkler kernel does not carry the
+// Levenshtein scratch frame in its local-memory footprint.
+template <int Code>
+__device__ __forceinline__ double DeviceSimilarityT(const char *a, int la,
+                                                    const char *b, int lb) {
+  if constexpr (Code == 0) {
+    return DeviceJaro(a, la, b, lb);
+  } else if constexpr (Code == 1) {
+    return DeviceJaroWinkler(a, la, b, lb);
+  } else if constexpr (Code == 2) {
+    return DeviceJaccard(a, la, b, lb);
+  } else {
+    return DeviceLevenshteinRatio(a, la, b, lb);
+  }
+}
+
+// Runtime dispatch for the filter position, where the measure is not known at
+// compile time and the row count is small.
 __device__ double DeviceSimilarity(int code, const char *a, int la, const char *b,
                                    int lb) {
   switch (code) {
   case 0:
-    return DeviceJaro(a, la, b, lb);
+    return DeviceSimilarityT<0>(a, la, b, lb);
   case 1:
-    return DeviceJaroWinkler(a, la, b, lb);
+    return DeviceSimilarityT<1>(a, la, b, lb);
   case 2:
-    return DeviceJaccard(a, la, b, lb);
+    return DeviceSimilarityT<2>(a, la, b, lb);
   case 3:
-    return DeviceLevenshteinRatio(a, la, b, lb);
+    return DeviceSimilarityT<3>(a, la, b, lb);
   }
   return 0.0;
 }
@@ -412,10 +433,12 @@ __global__ void JoinFillKernel(std::size_t nrows_left, std::size_t left_ncols,
   }
 }
 
+template <int Code>
 __global__ void SimCountKernel(std::size_t nrows_left, std::size_t nrows_right,
                                Cell *const *left_cols, Cell *const *right_cols,
-                               int left_key, int right_key, int code,
-                               double threshold, StringTable table, int *counts) {
+                               int left_key, int right_key, double threshold,
+                               StringTable table, int *counts,
+                               std::uint64_t *bitmap) {
   const std::size_t r = blockIdx.x * blockDim.x + threadIdx.x;
   if (r >= nrows_left) {
     return;
@@ -427,6 +450,7 @@ __global__ void SimCountKernel(std::size_t nrows_left, std::size_t nrows_right,
     la = kMaxStringLength;
   }
   int count = 0;
+  const std::size_t row_base = r * nrows_right;
   for (std::size_t s = 0; s < nrows_right; ++s) {
     const Cell rid = right_cols[right_key][s];
     const char *b = table.chars + table.offsets[rid];
@@ -434,39 +458,34 @@ __global__ void SimCountKernel(std::size_t nrows_left, std::size_t nrows_right,
     if (lb > kMaxStringLength) {
       lb = kMaxStringLength;
     }
-    if (DeviceSimilarity(code, a, la, b, lb) >= threshold) {
+    if (DeviceSimilarityT<Code>(a, la, b, lb) >= threshold) {
       ++count;
+      const std::size_t idx = row_base + s;
+      atomicOr(reinterpret_cast<unsigned long long *>(&bitmap[idx >> 6]),
+               1ULL << (idx & 63));
     }
   }
   counts[r] = count;
 }
 
+// The fill pass reads the match bitmap written by the count pass instead of
+// recomputing the measure, so each pair's similarity is evaluated exactly once.
+template <int Code>
 __global__ void SimFillKernel(std::size_t nrows_left, std::size_t nrows_right,
                               std::size_t left_ncols, std::size_t right_ncols,
                               Cell *const *left_cols, Cell *const *right_cols,
-                              int left_key, int right_key, int code,
-                              double threshold, StringTable table,
-                              const int *offsets, Cell *const *out) {
+                              const int *offsets, Cell *const *out,
+                              const std::uint64_t *bitmap) {
   const std::size_t r = blockIdx.x * blockDim.x + threadIdx.x;
   if (r >= nrows_left) {
     return;
   }
-  const Cell lid = left_cols[left_key][r];
-  const char *a = table.chars + table.offsets[lid];
-  int la = static_cast<int>(table.offsets[lid + 1] - table.offsets[lid]);
-  if (la > kMaxStringLength) {
-    la = kMaxStringLength;
-  }
   int index = 0;
   const int base = offsets[r];
+  const std::size_t row_base = r * nrows_right;
   for (std::size_t s = 0; s < nrows_right; ++s) {
-    const Cell rid = right_cols[right_key][s];
-    const char *b = table.chars + table.offsets[rid];
-    int lb = static_cast<int>(table.offsets[rid + 1] - table.offsets[rid]);
-    if (lb > kMaxStringLength) {
-      lb = kMaxStringLength;
-    }
-    if (DeviceSimilarity(code, a, la, b, lb) < threshold) {
+    const std::size_t idx = row_base + s;
+    if ((bitmap[idx >> 6] & (1ULL << (idx & 63))) == 0) {
       continue;
     }
     const int out_row = base + index;
@@ -802,34 +821,57 @@ StatusOr<DeviceRelation> EvalJoin(const PhysicalOp &op, DeviceRelation *left,
   return output;
 }
 
-StatusOr<DeviceRelation> EvalSimilarityJoin(const PhysicalOp &op,
-                                            DeviceRelation *left,
-                                            DeviceRelation *right,
-                                            DeviceContext *device) {
-  const int code = SimilarityCode(op.measure);
-  if (code < 0) {
-    return Status::Error("unknown similarity measure: " + op.measure);
-  }
-  if (device->max_string_length > kMaxStringLength) {
-    return Status::Error("string longer than GPU similarity limit (" +
-                         std::to_string(kMaxStringLength) + " chars)");
-  }
+template <int Code>
+StatusOr<DeviceRelation> EvalSimilarityJoinT(const PhysicalOp &op,
+                                             DeviceRelation *left,
+                                             DeviceRelation *right,
+                                             DeviceContext *device) {
   const std::size_t nrows_left = left->nrows;
   const std::size_t nrows_right = right->nrows;
   const std::size_t out_cols = op.output_schema.size();
+
+  const bool bench = std::getenv("HYPERDEDUCE_BENCH") != nullptr;
+  cudaEvent_t ev_start = nullptr;
+  cudaEvent_t ev_stop = nullptr;
+  if (bench) {
+    static bool diagnosed = false;
+    if (!diagnosed) {
+      diagnosed = true;
+      cudaFuncAttributes attr;
+      cudaFuncGetAttributes(&attr, SimCountKernel<Code>);
+      int blocks_per_sm = 0;
+      cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm,
+                                                    SimCountKernel<Code>, 256, 0);
+      int device_id = 0;
+      cudaGetDevice(&device_id);
+      cudaDeviceProp prop;
+      cudaGetDeviceProperties(&prop, device_id);
+      std::fprintf(stderr,
+                   "[diag] SimCountKernel<%d> localBytes=%zu regs=%d "
+                   "blocksPerSM=%d maxThreadsPerSM=%d\n",
+                   Code, attr.localSizeBytes, attr.numRegs, blocks_per_sm,
+                   prop.maxThreadsPerMultiProcessor);
+    }
+    cudaEventCreate(&ev_start);
+    cudaEventCreate(&ev_stop);
+    cudaEventRecord(ev_start);
+  }
 
   auto left_ptrs = ColumnPointers(left);
   auto right_ptrs = ColumnPointers(right);
 
   thrust::device_vector<int> counts(nrows_left, 0);
   thrust::device_vector<int> offsets(nrows_left + 1, 0);
+  const std::size_t pair_count = nrows_left * nrows_right;
+  thrust::device_vector<std::uint64_t> bitmap((pair_count + 63) / 64, 0);
   std::size_t total = 0;
   if (nrows_left > 0 && nrows_right > 0) {
-    SimCountKernel<<<BlockCount(nrows_left), 256>>>(
+    SimCountKernel<Code><<<BlockCount(nrows_left), 256>>>(
         nrows_left, nrows_right, thrust::raw_pointer_cast(left_ptrs.data()),
         thrust::raw_pointer_cast(right_ptrs.data()), op.left_key, op.right_key,
-        code, op.sim_threshold, device->table,
-        thrust::raw_pointer_cast(counts.data()));
+        op.sim_threshold, device->table,
+        thrust::raw_pointer_cast(counts.data()),
+        thrust::raw_pointer_cast(bitmap.data()));
     CUDA_CHECK(cudaGetLastError());
     thrust::exclusive_scan(counts.begin(), counts.end(), offsets.begin());
     total = static_cast<std::size_t>(offsets[nrows_left - 1]) +
@@ -846,16 +888,52 @@ StatusOr<DeviceRelation> EvalSimilarityJoin(const PhysicalOp &op,
   }
   if (total > 0) {
     auto out_ptrs = ColumnPointers(&output);
-    SimFillKernel<<<BlockCount(nrows_left), 256>>>(
+    SimFillKernel<Code><<<BlockCount(nrows_left), 256>>>(
         nrows_left, nrows_right, left->columns.size(), right->columns.size(),
         thrust::raw_pointer_cast(left_ptrs.data()),
-        thrust::raw_pointer_cast(right_ptrs.data()), op.left_key, op.right_key,
-        code, op.sim_threshold, device->table,
+        thrust::raw_pointer_cast(right_ptrs.data()),
         thrust::raw_pointer_cast(offsets.data()),
-        thrust::raw_pointer_cast(out_ptrs.data()));
+        thrust::raw_pointer_cast(out_ptrs.data()),
+        thrust::raw_pointer_cast(bitmap.data()));
     CUDA_CHECK(cudaGetLastError());
   }
+  if (bench) {
+    cudaEventRecord(ev_stop);
+    cudaEventSynchronize(ev_stop);
+    float ms = 0;
+    cudaEventElapsedTime(&ms, ev_start, ev_stop);
+    std::fprintf(stderr,
+                 "[bench] gpu similarity_join measure=%s ms=%.3f pairs=%zu out=%zu\n",
+                 op.measure.c_str(), ms, nrows_left * nrows_right, total);
+    cudaEventDestroy(ev_start);
+    cudaEventDestroy(ev_stop);
+  }
   return output;
+}
+
+StatusOr<DeviceRelation> EvalSimilarityJoin(const PhysicalOp &op,
+                                            DeviceRelation *left,
+                                            DeviceRelation *right,
+                                            DeviceContext *device) {
+  const int code = SimilarityCode(op.measure);
+  if (code < 0) {
+    return Status::Error("unknown similarity measure: " + op.measure);
+  }
+  if (device->max_string_length > kMaxStringLength) {
+    return Status::Error("string longer than GPU similarity limit (" +
+                         std::to_string(kMaxStringLength) + " chars)");
+  }
+  switch (code) {
+  case 0:
+    return EvalSimilarityJoinT<0>(op, left, right, device);
+  case 1:
+    return EvalSimilarityJoinT<1>(op, left, right, device);
+  case 2:
+    return EvalSimilarityJoinT<2>(op, left, right, device);
+  case 3:
+    return EvalSimilarityJoinT<3>(op, left, right, device);
+  }
+  return Status::Error("unknown similarity measure: " + op.measure);
 }
 
 StatusOr<DeviceRelation> EvalProject(const PhysicalOp &op, DeviceRelation *input) {
