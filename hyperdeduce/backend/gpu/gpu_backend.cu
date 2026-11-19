@@ -433,69 +433,89 @@ __global__ void JoinFillKernel(std::size_t nrows_left, std::size_t left_ncols,
   }
 }
 
+// One thread per (left, right) pair. Parallelizing over pairs rather than left
+// rows exposes millions of threads instead of a few thousand, which is what
+// fills the GPU; a left-row-parallel kernel left ~99% of the device idle.
 template <int Code>
-__global__ void SimCountKernel(std::size_t nrows_left, std::size_t nrows_right,
+__global__ void SimCountKernel(std::size_t pair_count, std::size_t nrows_right,
                                Cell *const *left_cols, Cell *const *right_cols,
                                int left_key, int right_key, double threshold,
-                               StringTable table, int *counts,
-                               std::uint64_t *bitmap) {
-  const std::size_t r = blockIdx.x * blockDim.x + threadIdx.x;
-  if (r >= nrows_left) {
+                               StringTable table, std::uint64_t *bitmap) {
+  const std::size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= pair_count) {
     return;
   }
+  const std::size_t r = idx / nrows_right;
+  const std::size_t s = idx % nrows_right;
   const Cell lid = left_cols[left_key][r];
   const char *a = table.chars + table.offsets[lid];
   int la = static_cast<int>(table.offsets[lid + 1] - table.offsets[lid]);
   if (la > kMaxStringLength) {
     la = kMaxStringLength;
   }
-  int count = 0;
-  const std::size_t row_base = r * nrows_right;
-  for (std::size_t s = 0; s < nrows_right; ++s) {
-    const Cell rid = right_cols[right_key][s];
-    const char *b = table.chars + table.offsets[rid];
-    int lb = static_cast<int>(table.offsets[rid + 1] - table.offsets[rid]);
-    if (lb > kMaxStringLength) {
-      lb = kMaxStringLength;
-    }
-    if (DeviceSimilarityT<Code>(a, la, b, lb) >= threshold) {
-      ++count;
-      const std::size_t idx = row_base + s;
-      atomicOr(reinterpret_cast<unsigned long long *>(&bitmap[idx >> 6]),
-               1ULL << (idx & 63));
-    }
+  const Cell rid = right_cols[right_key][s];
+  const char *b = table.chars + table.offsets[rid];
+  int lb = static_cast<int>(table.offsets[rid + 1] - table.offsets[rid]);
+  if (lb > kMaxStringLength) {
+    lb = kMaxStringLength;
   }
-  counts[r] = count;
+  if (DeviceSimilarityT<Code>(a, la, b, lb) >= threshold) {
+    atomicOr(reinterpret_cast<unsigned long long *>(&bitmap[idx >> 6]),
+             1ULL << (idx & 63));
+  }
 }
 
-// The fill pass reads the match bitmap written by the count pass instead of
-// recomputing the measure, so each pair's similarity is evaluated exactly once.
-template <int Code>
-__global__ void SimFillKernel(std::size_t nrows_left, std::size_t nrows_right,
-                              std::size_t left_ncols, std::size_t right_ncols,
-                              Cell *const *left_cols, Cell *const *right_cols,
-                              const int *offsets, Cell *const *out,
-                              const std::uint64_t *bitmap) {
+// Counts matches per left row by popcounting its slice of the match bitmap.
+__global__ void SimRowCountKernel(std::size_t nrows_left, std::size_t nrows_right,
+                                  const std::uint64_t *bitmap, int *counts) {
   const std::size_t r = blockIdx.x * blockDim.x + threadIdx.x;
   if (r >= nrows_left) {
     return;
   }
-  int index = 0;
-  const int base = offsets[r];
-  const std::size_t row_base = r * nrows_right;
-  for (std::size_t s = 0; s < nrows_right; ++s) {
-    const std::size_t idx = row_base + s;
-    if ((bitmap[idx >> 6] & (1ULL << (idx & 63))) == 0) {
-      continue;
+  const std::size_t begin = r * nrows_right;
+  const std::size_t end = begin + nrows_right;
+  const std::size_t w_begin = begin >> 6;
+  const std::size_t w_end = (end + 63) >> 6;
+  int count = 0;
+  for (std::size_t w = w_begin; w < w_end; ++w) {
+    std::uint64_t word = bitmap[w];
+    if (w == w_begin) {
+      word &= ~0ULL << (begin & 63);
     }
-    const int out_row = base + index;
-    ++index;
-    for (std::size_t c = 0; c < left_ncols; ++c) {
-      out[c][out_row] = left_cols[c][r];
+    if (w == w_end - 1) {
+      const int rem = static_cast<int>(end & 63);
+      if (rem != 0) {
+        word &= (1ULL << rem) - 1;
+      }
     }
-    for (std::size_t c = 0; c < right_ncols; ++c) {
-      out[left_ncols + c][out_row] = right_cols[c][s];
-    }
+    count += __popcll(word);
+  }
+  counts[r] = count;
+}
+
+// The fill pass reads the match bitmap instead of recomputing the measure, so
+// each pair's similarity is evaluated exactly once. Matches append to the output
+// through an atomic counter; order is irrelevant because the engine dedups.
+__global__ void SimFillKernel(std::size_t pair_count, std::size_t nrows_right,
+                              std::size_t left_ncols, std::size_t right_ncols,
+                              Cell *const *left_cols, Cell *const *right_cols,
+                              Cell *const *out, const std::uint64_t *bitmap,
+                              int *out_counter) {
+  const std::size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= pair_count) {
+    return;
+  }
+  if ((bitmap[idx >> 6] & (1ULL << (idx & 63))) == 0) {
+    return;
+  }
+  const int slot = atomicAdd(out_counter, 1);
+  const std::size_t r = idx / nrows_right;
+  const std::size_t s = idx % nrows_right;
+  for (std::size_t c = 0; c < left_ncols; ++c) {
+    out[c][slot] = left_cols[c][r];
+  }
+  for (std::size_t c = 0; c < right_ncols; ++c) {
+    out[left_ncols + c][slot] = right_cols[c][s];
   }
 }
 
@@ -864,14 +884,18 @@ StatusOr<DeviceRelation> EvalSimilarityJoinT(const PhysicalOp &op,
   thrust::device_vector<int> offsets(nrows_left + 1, 0);
   const std::size_t pair_count = nrows_left * nrows_right;
   thrust::device_vector<std::uint64_t> bitmap((pair_count + 63) / 64, 0);
+  thrust::device_vector<int> out_counter(1, 0);
   std::size_t total = 0;
-  if (nrows_left > 0 && nrows_right > 0) {
-    SimCountKernel<Code><<<BlockCount(nrows_left), 256>>>(
-        nrows_left, nrows_right, thrust::raw_pointer_cast(left_ptrs.data()),
+  if (pair_count > 0) {
+    SimCountKernel<Code><<<BlockCount(pair_count), 256>>>(
+        pair_count, nrows_right, thrust::raw_pointer_cast(left_ptrs.data()),
         thrust::raw_pointer_cast(right_ptrs.data()), op.left_key, op.right_key,
         op.sim_threshold, device->table,
-        thrust::raw_pointer_cast(counts.data()),
         thrust::raw_pointer_cast(bitmap.data()));
+    CUDA_CHECK(cudaGetLastError());
+    SimRowCountKernel<<<BlockCount(nrows_left), 256>>>(
+        nrows_left, nrows_right, thrust::raw_pointer_cast(bitmap.data()),
+        thrust::raw_pointer_cast(counts.data()));
     CUDA_CHECK(cudaGetLastError());
     thrust::exclusive_scan(counts.begin(), counts.end(), offsets.begin());
     total = static_cast<std::size_t>(offsets[nrows_left - 1]) +
@@ -888,13 +912,13 @@ StatusOr<DeviceRelation> EvalSimilarityJoinT(const PhysicalOp &op,
   }
   if (total > 0) {
     auto out_ptrs = ColumnPointers(&output);
-    SimFillKernel<Code><<<BlockCount(nrows_left), 256>>>(
-        nrows_left, nrows_right, left->columns.size(), right->columns.size(),
+    SimFillKernel<<<BlockCount(pair_count), 256>>>(
+        pair_count, nrows_right, left->columns.size(), right->columns.size(),
         thrust::raw_pointer_cast(left_ptrs.data()),
         thrust::raw_pointer_cast(right_ptrs.data()),
-        thrust::raw_pointer_cast(offsets.data()),
         thrust::raw_pointer_cast(out_ptrs.data()),
-        thrust::raw_pointer_cast(bitmap.data()));
+        thrust::raw_pointer_cast(bitmap.data()),
+        thrust::raw_pointer_cast(out_counter.data()));
     CUDA_CHECK(cudaGetLastError());
   }
   if (bench) {
