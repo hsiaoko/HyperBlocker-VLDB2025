@@ -459,6 +459,21 @@ __global__ void SimCountKernel(std::size_t pair_count, std::size_t nrows_right,
   if (lb > kMaxStringLength) {
     lb = kMaxStringLength;
   }
+  // Length-based upper bound prunes pairs that cannot reach the threshold
+  // before paying for the full measure. Jaro <= (2 + min/max)/3 because matches
+  // <= min(la,lb); Jaro-Winkler adds a prefix bonus <= 0.4*(1-jaro), giving
+  // <= 0.8 + 0.2*min/max.
+  if constexpr (Code == 0 || Code == 1) {
+    const int mn = la < lb ? la : lb;
+    const int mx = la > lb ? la : lb;
+    if (mx > 0) {
+      const double ratio = static_cast<double>(mn) / static_cast<double>(mx);
+      const double upper = Code == 1 ? 0.8 + 0.2 * ratio : (2.0 + ratio) / 3.0;
+      if (upper < threshold) {
+        return;
+      }
+    }
+  }
   if (DeviceSimilarityT<Code>(a, la, b, lb) >= threshold) {
     atomicOr(reinterpret_cast<unsigned long long *>(&bitmap[idx >> 6]),
              1ULL << (idx & 63));
