@@ -19,14 +19,17 @@ def read_rows(path):
 
 def main():
     cli, data_dir, rules, work_dir = sys.argv[1:5]
+    backend = sys.argv[5] if len(sys.argv) > 5 else "cpu"
+    gpus = sys.argv[6] if len(sys.argv) > 6 else "0"
     out_cpp = os.path.join(work_dir, "cpp")
     out_py = os.path.join(work_dir, "py")
     os.makedirs(out_cpp, exist_ok=True)
 
-    subprocess.run(
-        [cli, "--data_dir", data_dir, "--rules", rules,
-         "--output_dir", out_cpp, "--backend", "cpu"],
-        check=True, stdout=subprocess.DEVNULL)
+    command = [cli, "--data_dir", data_dir, "--rules", rules,
+               "--output_dir", out_cpp, "--backend", backend]
+    if backend == "gpu":
+        command += ["--gpus", gpus]
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(
         [sys.executable, os.path.join(os.path.dirname(__file__), "oracle.py"),
          data_dir, rules, out_py],

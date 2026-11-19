@@ -15,11 +15,15 @@
 #include "hyperdeduce/backend/cpu/cpu_backend.h"
 #include "hyperdeduce/engine/engine.h"
 #include "hyperdeduce/io/csv.h"
+#ifdef HYPERDEDUCE_WITH_CUDA
+#include "hyperdeduce/backend/gpu/gpu_backend.h"
+#endif
 
 DEFINE_string(data_dir, "", "directory of <predicate>.csv base relations");
 DEFINE_string(rules, "", "path to a Datalog rules file");
 DEFINE_string(output_dir, "", "directory to write derived relations");
 DEFINE_string(backend, "cpu", "execution backend: cpu or gpu");
+DEFINE_int32(gpus, 0, "number of GPUs to use (0 = all visible)");
 DEFINE_bool(explain, false, "print the execution plans before running");
 DEFINE_bool(has_header, false, "treat the first CSV row as column names");
 
@@ -84,6 +88,13 @@ int main(int argc, char *argv[]) {
   std::unique_ptr<hyperdeduce::Backend> backend;
   if (FLAGS_backend == "cpu") {
     backend = std::make_unique<hyperdeduce::CpuBackend>();
+  } else if (FLAGS_backend == "gpu") {
+#ifdef HYPERDEDUCE_WITH_CUDA
+    backend = std::make_unique<hyperdeduce::GpuBackend>(FLAGS_gpus);
+#else
+    std::cerr << "this build has no CUDA support\n";
+    return 1;
+#endif
   } else {
     std::cerr << "unknown backend: " << FLAGS_backend << "\n";
     return 1;
