@@ -105,5 +105,47 @@ TEST(MqoTest, NormalizedVariableNamesShareOneBase) {
   EXPECT_GT(Rows(engine, "match_jw").size(), 0u);
 }
 
+TEST(MqoTest, HeterogeneousTableSchemasShareCorrectly) {
+  // A is [int,string], B is [string,int]: different schemas. The shared base must
+  // keep per-column types, route the similarity to the string columns, and emit
+  // the int columns, identically for both differently-named rules.
+  const std::string a = WriteTemp("mqoh_A.csv", "1,martha\n2,dixon\n3,algorithm\n");
+  const std::string b = WriteTemp("mqoh_B.csv", "marhta,10\ndicksonx,20\nalgorithm,30\n");
+  const char rules[] =
+      "m1(x, y) :- A(x, t1), B(t2, y), jaro_winkler(t1, t2, 0.8).\n"
+      "m2(u, v) :- A(u, s1), B(s2, v), jaro_winkler(s1, s2, 0.8).";
+
+  Engine engine;
+  ASSERT_TRUE(engine.LoadCsv(a, "A").ok());
+  ASSERT_TRUE(engine.LoadCsv(b, "B").ok());
+  ASSERT_TRUE(engine.AddRules(rules).ok());
+  engine.set_mqo(true);
+  ASSERT_TRUE(engine.BuildPlan().ok());
+
+  const Relation *shared = engine.GetRelation("__shared_0");
+  ASSERT_NE(nullptr, shared);
+  ASSERT_EQ(4u, shared->num_columns());
+  EXPECT_EQ(DataType::kInt64, shared->column(0).type);   // A col0
+  EXPECT_EQ(DataType::kString, shared->column(1).type);  // A col1
+  EXPECT_EQ(DataType::kString, shared->column(2).type);  // B col0
+  EXPECT_EQ(DataType::kInt64, shared->column(3).type);   // B col1
+
+  CpuBackend backend;
+  ASSERT_TRUE(engine.Execute(&backend).ok());
+  EXPECT_EQ(Rows(engine, "m1"), Rows(engine, "m2"));
+  EXPECT_GT(Rows(engine, "m1").size(), 0u);
+  EXPECT_EQ(DataType::kInt64, engine.GetRelation("m1")->column(0).type);
+
+  Engine without;
+  ASSERT_TRUE(without.LoadCsv(a, "A").ok());
+  ASSERT_TRUE(without.LoadCsv(b, "B").ok());
+  ASSERT_TRUE(without.AddRules(rules).ok());
+  without.set_mqo(false);
+  ASSERT_TRUE(without.BuildPlan().ok());
+  ASSERT_TRUE(without.Execute(&backend).ok());
+  EXPECT_EQ(Rows(without, "m1"), Rows(engine, "m1"));
+  EXPECT_EQ(Rows(without, "m2"), Rows(engine, "m2"));
+}
+
 } // namespace
 } // namespace hyperdeduce
