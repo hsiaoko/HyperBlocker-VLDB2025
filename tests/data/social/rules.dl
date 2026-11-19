@@ -1,0 +1,4 @@
+adult(x) :- person(x, a), a >= 18.
+connected(x, y) :- friend(x, y).
+connected(x, z) :- friend(x, y), connected(y, z).
+adult_reach(x, y) :- adult(x), connected(x, y), adult(y).

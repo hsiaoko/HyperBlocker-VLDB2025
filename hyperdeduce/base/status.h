@@ -1,6 +1,7 @@
 #ifndef HYPERDEDUCE_BASE_STATUS_H_
 #define HYPERDEDUCE_BASE_STATUS_H_
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -43,13 +44,13 @@ public:
 
   const Status &status() const { return status_; }
 
-  const T &value() const & { return value_; }
+  const T &value() const & { return *value_; }
 
-  T &&value() && { return std::move(value_); }
+  T &&value() && { return std::move(*value_); }
 
 private:
   Status status_;
-  T value_{};
+  std::optional<T> value_;
 };
 
 } // namespace hyperdeduce

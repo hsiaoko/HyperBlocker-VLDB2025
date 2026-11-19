@@ -36,3 +36,4 @@ if(HYPERDEDUCE_BUILD_TESTS)
 endif()
 
 add_subdirectory(hyperdeduce)
+add_subdirectory(examples)

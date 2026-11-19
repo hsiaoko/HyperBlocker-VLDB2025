@@ -178,14 +178,17 @@ StatusOr<Program> BuildProgram(std::vector<Rule> rules) {
     }
   }
 
+  // IDB predicates get a dense 0..n-1 numbering for the dependency graph,
+  // independent of their slot in predicates_ (which also holds EDB predicates).
   std::unordered_map<std::string, int> idb_index;
+  int idb_count = 0;
   for (const std::string &name : names) {
     PredicateInfo info;
     info.name = name;
     info.arity = arity[name];
     info.is_idb = idb_names.count(name) != 0;
     if (info.is_idb) {
-      idb_index[name] = static_cast<int>(program.predicates_.size());
+      idb_index[name] = idb_count++;
     }
     program.predicate_index_[name] = program.predicates_.size();
     program.predicates_.push_back(std::move(info));

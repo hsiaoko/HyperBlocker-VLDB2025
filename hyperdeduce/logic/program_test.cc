@@ -61,6 +61,23 @@ TEST(ProgramTest, MutualRecursionFormsOneStratum) {
   EXPECT_TRUE(program.value().FindPredicate("q")->recursive);
 }
 
+TEST(ProgramTest, StrataNamesValidWhenEdbInterleaved) {
+  // base (EDB) appears between two IDB heads in first-appearance order. The
+  // IDB dependency graph must use a dense numbering, not predicates_ slots.
+  auto program = BuildFromText(
+      "a(x) :- base(x).\n"
+      "b(x) :- a(x), base(x).");
+  ASSERT_TRUE(program.ok()) << program.status().message();
+  const auto &strata = program.value().strata();
+  ASSERT_EQ(2u, strata.size());
+  for (const auto &stratum : strata) {
+    for (const std::string &name : stratum) {
+      EXPECT_FALSE(name.empty());
+    }
+  }
+  EXPECT_LT(StratumIndex(program.value(), "a"), StratumIndex(program.value(), "b"));
+}
+
 TEST(ProgramTest, RejectsUnsafeHeadVariable) {
   auto program = BuildFromText("p(x, y) :- q(x).");
   EXPECT_FALSE(program.ok());
