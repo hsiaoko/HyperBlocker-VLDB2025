@@ -38,8 +38,14 @@ the format itself.
 `FrontendRegistry`. `DatalogFrontend` and `YamlFrontend` derive from it and both
 produce the same `Rule` AST. Adding a format means deriving a frontend and
 registering it once. `parser/` holds the Datalog lexer, recursive-descent
-parser, and `ast.h` (Term, Atom, Rule). `io/csv` loads and writes CSV with
-rapidcsv and infers column types.
+parser, and `ast.h` (Term, Atom, Rule).
+
+Data input is symmetric. `input/relation_loader` defines the `RelationLoader`
+interface and the `LoaderRegistry`. `CsvLoader` and `TsvLoader` derive from it
+and read a file into a catalog relation. `Engine::LoadRelation` and the CLI
+dispatch by file extension through the registry, so no format is hardcoded.
+`io/csv` is the underlying rapidcsv reader and writer with column-type
+inference; the loaders adapt it.
 
 ### Representation
 
@@ -120,10 +126,11 @@ state, so report the median and the range, not a single run.
 | A predicate (incl. learned/ML) | `BuiltinRegistry::Register` |
 | An execution backend | implement `Backend` |
 | A join algorithm | a new `PhysicalOp` plus an optimizer rule |
-| A data format (not yet built) | a `RelationLoader` interface |
+| A data format | derive `RelationLoader` and register |
 
 ## Current limits
 
 Positive Datalog only; negation and aggregation are not implemented. Similarity
 score columns and fuzzy/weighted fixpoint are future work. 0-ary relations are
-not evaluated. Data loading is CSV-only and not yet behind an interface.
+not evaluated. Data loaders cover CSV and TSV; JSON and Parquet are future
+formats behind the same `RelationLoader` interface.

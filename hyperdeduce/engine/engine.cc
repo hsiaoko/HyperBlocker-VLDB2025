@@ -1,9 +1,11 @@
 #include "hyperdeduce/engine/engine.h"
 
+#include <filesystem>
 #include <sstream>
 #include <utility>
 
 #include "hyperdeduce/builtin/builtin.h"
+#include "hyperdeduce/input/csv_loader.h"
 #include "hyperdeduce/input/datalog_frontend.h"
 #include "hyperdeduce/plan/optimizer.h"
 
@@ -16,9 +18,34 @@ bool IsNumeric(DataType type) {
 
 } // namespace
 
+StatusOr<Relation *> Engine::LoadRelation(const std::string &path,
+                                          const std::string &name,
+                                          const LoadOptions &options) {
+  std::string extension = std::filesystem::path(path).extension().string();
+  if (!extension.empty()) {
+    extension = extension.substr(1);
+  }
+  const RelationLoader *loader =
+      LoaderRegistry::Instance().ByExtension(extension);
+  if (loader == nullptr) {
+    return Status::Error("no loader registered for extension: " + extension);
+  }
+  auto loaded = loader->Load(path, name, &catalog_, options);
+  if (!loaded.ok()) {
+    return loaded.status();
+  }
+  planned_ = false;
+  return loaded.value();
+}
+
 Status Engine::LoadCsv(const std::string &path, const std::string &name,
                        const CsvOptions &options) {
-  auto loaded = hyperdeduce::LoadCsv(path, name, &catalog_, options);
+  LoadOptions load_options;
+  load_options.has_header = options.has_header;
+  load_options.separator = options.separator;
+  load_options.column_types = options.column_types;
+  const CsvLoader loader;
+  auto loaded = loader.Load(path, name, &catalog_, load_options);
   if (!loaded.ok()) {
     return loaded.status();
   }

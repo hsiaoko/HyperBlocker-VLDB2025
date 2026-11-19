@@ -13,6 +13,7 @@
 #include "hyperdeduce/base/status.h"
 #include "hyperdeduce/catalog/catalog.h"
 #include "hyperdeduce/catalog/row_key.h"
+#include "hyperdeduce/input/relation_loader.h"
 #include "hyperdeduce/input/rule_frontend.h"
 #include "hyperdeduce/io/csv.h"
 #include "hyperdeduce/logic/program.h"
@@ -29,6 +30,13 @@ class Engine {
 public:
   Engine() = default;
 
+  // Unified data input path: a registered loader reads the file into a new
+  // relation, selected by file extension. Symmetric to AddRules(frontend).
+  StatusOr<Relation *> LoadRelation(const std::string &path,
+                                    const std::string &name,
+                                    const LoadOptions &options = {});
+
+  // Convenience: load a CSV file.
   Status LoadCsv(const std::string &path, const std::string &name,
                  const CsvOptions &options = {});
 

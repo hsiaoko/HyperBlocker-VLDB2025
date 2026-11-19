@@ -14,6 +14,7 @@
 
 #include "hyperdeduce/backend/cpu/cpu_backend.h"
 #include "hyperdeduce/engine/engine.h"
+#include "hyperdeduce/input/relation_loader.h"
 #include "hyperdeduce/input/rule_frontend.h"
 #include "hyperdeduce/io/csv.h"
 #ifdef HYPERDEDUCE_WITH_CUDA
@@ -50,19 +51,26 @@ int main(int argc, char *argv[]) {
   using hyperdeduce::StatusOr;
 
   hyperdeduce::Engine engine;
-  hyperdeduce::CsvOptions options;
+  hyperdeduce::LoadOptions options;
   options.has_header = FLAGS_has_header;
 
   if (!FLAGS_data_dir.empty()) {
     for (const auto &entry :
          std::filesystem::directory_iterator(FLAGS_data_dir)) {
-      if (entry.path().extension() != ".csv") {
+      std::string extension = entry.path().extension().string();
+      if (!extension.empty()) {
+        extension = extension.substr(1);
+      }
+      // The loader registry decides which files are data; rule files and other
+      // unrecognized extensions are skipped.
+      if (hyperdeduce::LoaderRegistry::Instance().ByExtension(extension) ==
+          nullptr) {
         continue;
       }
       const std::string name = entry.path().stem().string();
-      Status loaded = engine.LoadCsv(entry.path().string(), name, options);
+      auto loaded = engine.LoadRelation(entry.path().string(), name, options);
       if (!loaded.ok()) {
-        std::cerr << "load failed: " << loaded.message() << "\n";
+        std::cerr << "load failed: " << loaded.status().message() << "\n";
         return 1;
       }
     }
