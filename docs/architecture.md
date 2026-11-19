@@ -58,7 +58,11 @@ and `row_key` (row hashing for dedup).
 
 `logic/program` validates safety and arity, builds the predicate dependency
 graph, and groups derived predicates into strata with Tarjan SCC. It marks
-EDB versus IDB and recursive predicates.
+EDB versus IDB and recursive predicates. `logic/mqo` does multiple-query
+optimization: rules sharing an identical all-EDB relational body get a synthetic
+`__shared_k` base rule materialized once, and each rule is rewritten to scan that
+base plus its own builtin atoms. The dependency graph evaluates the shared base
+first, so the common join runs once instead of once per rule.
 
 ### Planning
 

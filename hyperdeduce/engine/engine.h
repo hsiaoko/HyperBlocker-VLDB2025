@@ -67,6 +67,10 @@ public:
   // Statistics collected across load, plan, and the most recent Execute.
   const RunStats &run_stats() const { return run_stats_; }
 
+  // Multiple-query optimization: share common relational bodies across rules.
+  // On by default; applied during BuildPlan.
+  void set_mqo(bool enabled) { mqo_ = enabled; }
+
 private:
   Status EnsurePlanned();
   Status InferIdbSchemas();
@@ -82,6 +86,8 @@ private:
   std::map<std::pair<int, int>, std::unique_ptr<PhysicalOp>> delta_plans_;
   std::unordered_map<std::string, std::unordered_set<RowKey, KeyHash>> idb_index_;
   bool planned_ = false;
+  bool mqo_ = true;
+  bool mqo_applied_ = false;
   RunStats run_stats_;
   BackendStats backend_stats_;
 };

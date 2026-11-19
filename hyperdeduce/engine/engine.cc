@@ -8,6 +8,7 @@
 #include "hyperdeduce/builtin/builtin.h"
 #include "hyperdeduce/input/csv_loader.h"
 #include "hyperdeduce/input/datalog_frontend.h"
+#include "hyperdeduce/logic/mqo.h"
 #include "hyperdeduce/plan/optimizer.h"
 
 namespace hyperdeduce {
@@ -84,6 +85,7 @@ Status Engine::AddRules(const std::string &source, const RuleFrontend &frontend,
     rules_.push_back(std::move(rule));
   }
   planned_ = false;
+  mqo_applied_ = false;
   return Status::Ok();
 }
 
@@ -185,6 +187,10 @@ Status Engine::InferIdbSchemas() {
 
 StatusOr<std::string> Engine::BuildPlan() {
   const auto start = std::chrono::steady_clock::now();
+  if (mqo_ && !mqo_applied_) {
+    ApplyMqo(rules_, catalog_);
+    mqo_applied_ = true;
+  }
   auto program = BuildProgram(rules_);
   if (!program.ok()) {
     return program.status();

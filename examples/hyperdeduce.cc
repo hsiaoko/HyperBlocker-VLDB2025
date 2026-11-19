@@ -30,6 +30,7 @@ DEFINE_string(backend, "cpu", "execution backend: cpu or gpu");
 DEFINE_int32(gpus, 0, "number of GPUs to use (0 = all visible)");
 DEFINE_bool(explain, false, "print the execution plans before running");
 DEFINE_bool(report, true, "print the run report (load/plan/eval stats and timing)");
+DEFINE_bool(mqo, true, "share common relational bodies across rules (multi-query optimization)");
 DEFINE_bool(has_header, false, "treat the first CSV row as column names");
 
 namespace {
@@ -135,6 +136,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  engine.set_mqo(FLAGS_mqo);
   auto plan = engine.BuildPlan();
   if (!plan.ok()) {
     std::cerr << "plan failed: " << plan.status().message() << "\n";
@@ -168,6 +170,9 @@ int main(int argc, char *argv[]) {
   if (!FLAGS_output_dir.empty()) {
     std::filesystem::create_directories(FLAGS_output_dir);
     for (const std::string &name : engine.IdbNames()) {
+      if (name.rfind("__shared_", 0) == 0) {
+        continue; // internal MQO intermediate, not a query result
+      }
       const hyperdeduce::Relation *relation = engine.GetRelation(name);
       const std::string path = FLAGS_output_dir + "/" + name + ".csv";
       Status written = hyperdeduce::WriteCsv(
@@ -181,6 +186,9 @@ int main(int argc, char *argv[]) {
     }
   } else {
     for (const std::string &name : engine.IdbNames()) {
+      if (name.rfind("__shared_", 0) == 0) {
+        continue;
+      }
       std::cout << name << ": " << engine.GetRelation(name)->num_rows()
                 << " rows\n";
     }
