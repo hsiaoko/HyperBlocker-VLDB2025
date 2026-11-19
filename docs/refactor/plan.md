@@ -13,11 +13,14 @@ execution plan, then evaluates the rules to a fixpoint on multiple CPUs or
 multiple GPUs. You read the derived relations back, or write them to CSV.
 
 ```
-parent(alice, bob).
-parent(bob, carol).
+parent("alice", "bob").
+parent("bob", "carol").
 ancestor(x, y) :- parent(x, y).
 ancestor(x, z) :- parent(x, y), ancestor(y, z).
 ```
+
+A bare identifier in a term position is a variable. Constants are numbers or
+double-quoted strings, so facts use quoted strings.
 
 Loading `parent.csv` and these rules derives `ancestor` as the transitive
 closure of `parent`.
